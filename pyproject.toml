@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "src.mcp_http_server:app"

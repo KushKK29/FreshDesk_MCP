@@ -38,7 +38,10 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pymongo import MongoClient
 
-import freshdesk_client as fd
+try:
+    import freshdesk_client as fd  # flat import, local dev (--app-dir src)
+except ImportError:
+    from src import freshdesk_client as fd  # package-relative, Vercel (src.oauth_server:app)
 
 app = FastAPI()
 

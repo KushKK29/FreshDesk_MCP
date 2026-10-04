@@ -24,8 +24,14 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-import freshdesk_client as fd
-from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
+try:
+    # Flat import — works when run as `uvicorn mcp_http_server:app --app-dir src` (local dev).
+    import freshdesk_client as fd
+    from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
+except ImportError:
+    # Package-relative import — works when imported as `src.mcp_http_server:app` (Vercel).
+    from src import freshdesk_client as fd
+    from src.oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 
 
 class MongoGrantTokenVerifier(TokenVerifier):
