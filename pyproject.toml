@@ -1,2 +1,15 @@
+[project]
+name = "freshdesk-connector"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "mcp<2",
+    "fastapi",
+    "uvicorn",
+    "pymongo",
+    "python-multipart",
+]
+
 [tool.vercel]
 entrypoint = "src.mcp_http_server:app"
