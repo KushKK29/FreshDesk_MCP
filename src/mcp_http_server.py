@@ -83,8 +83,10 @@ mcp = FastMCP(
         # DNS-rebinding protection defaults to an EMPTY allowed_hosts list, which rejects every
         # Host header including our own public one — "Invalid Host header", 421 Misdirected
         # Request, observed live against ChatGPT. Must explicitly allow the deployed hostname.
-        allowed_hosts=[os.environ.get("OAUTH_BASE_URL", BASE_URL).split("://")[-1]],
-        allowed_origins=[os.environ.get("OAUTH_BASE_URL", BASE_URL)],
+        # Uses the already-rstrip'd BASE_URL (from oauth_server.py), not the raw env var — a
+        # trailing slash here would put a stray "/" on the end of the allowed hostname.
+        allowed_hosts=[BASE_URL.split("://")[-1]],
+        allowed_origins=[BASE_URL],
     ),
 )
 

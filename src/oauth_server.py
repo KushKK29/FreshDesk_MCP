@@ -46,7 +46,11 @@ except ImportError:
 app = FastAPI()
 
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-BASE_URL = os.environ.get("OAUTH_BASE_URL", "http://localhost:8004")  # this server's own public URL
+BASE_URL = os.environ.get("OAUTH_BASE_URL", "http://localhost:8004").rstrip("/")
+# This server's own public URL. rstrip is required: if OAUTH_BASE_URL has a trailing slash
+# (confirmed on Vercel), every endpoint built from it got a double slash — e.g.
+# "https://fresh-desk-mcp.vercel.app//oauth/authorize" — which ChatGPT rejected outright with
+# "Some app settings were rejected. Check the server URL..." observed live.
 
 CODE_TTL_SECONDS = 60
 ACCESS_TTL_SECONDS = 60 * 60

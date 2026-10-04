@@ -16,6 +16,11 @@ See [PLAN.md](PLAN.md) for full architecture and design rationale,
 
 Both share the same Freshdesk HTTP client (`src/freshdesk_client.py`).
 
+**Live deployment (Mode 2):** [`https://fresh-desk-mcp.vercel.app`](https://fresh-desk-mcp.vercel.app)
+— this is the URL to use in the "Connect from ChatGPT / Claude / Claude Code"
+sections below. No setup needed to try it; just connect and authorize with
+your own Freshdesk domain and API key.
+
 ---
 
 ## Mode 1: Single-tenant (API key)
@@ -76,9 +81,10 @@ be replayed and that refresh tokens rotate correctly.
 
 ### Deploy it (so Claude/ChatGPT can connect from anywhere)
 
-1. Deploy `src/mcp_http_server.py` to any host that can run a FastAPI/ASGI
-   app (Vercel, Render — see the voice-agent project in this submission for
-   the same deployment pattern with a different service).
+Already deployed at `https://fresh-desk-mcp.vercel.app` — to deploy your own copy:
+
+1. Deploy this repo to Vercel (the included `pyproject.toml` has the
+   `[tool.vercel] entrypoint = "src.mcp_http_server:app"` setting it needs).
 2. Set `OAUTH_BASE_URL` to that deployed URL (e.g. `https://your-app.vercel.app`).
    This value feeds both the OAuth discovery metadata and the MCP transport's
    allowed-hosts check — get it wrong and every tool call 421s.
@@ -86,11 +92,14 @@ be replayed and that refresh tokens rotate correctly.
 4. For local testing before a real deploy, `ngrok http 8004` gives a public
    HTTPS URL — set `OAUTH_BASE_URL` to that ngrok URL.
 
+(Render also works with the same `src/mcp_http_server.py` entrypoint — see
+the voice-agent project in this submission for that deployment pattern.)
+
 ### Connect from ChatGPT
 
 1. ChatGPT → **Settings → Connectors** (or the legacy **Plugins** page,
    depending on your account) → **Connect / Add a connector**.
-2. Enter your deployed URL (e.g. `https://your-app.vercel.app`).
+2. Enter `https://fresh-desk-mcp.vercel.app` (or your own deployed URL).
 3. ChatGPT auto-discovers the OAuth + MCP endpoints from
    `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`.
 4. Click through the OAuth consent screen — enter your real Freshdesk domain
@@ -106,7 +115,7 @@ ChatGPT can cache a stale manifest from an earlier connection attempt.
 ### Connect from Claude (claude.ai)
 
 1. Claude → **Settings → Connectors** → **Add custom connector**.
-2. Enter your deployed URL as the MCP server endpoint.
+2. Enter `https://fresh-desk-mcp.vercel.app` as the MCP server endpoint.
 3. Same OAuth consent flow as above — Freshdesk domain + API key, approve.
 4. Ask Claude to list or search your Freshdesk tickets in any chat.
 
@@ -114,7 +123,7 @@ ChatGPT can cache a stale manifest from an earlier connection attempt.
 
 Claude Code speaks MCP natively over stdio or HTTP. To add this connector:
 ```bash
-claude mcp add --transport http freshdesk https://your-deployed-url
+claude mcp add --transport http freshdesk https://fresh-desk-mcp.vercel.app
 ```
 Claude Code will walk you through the same OAuth consent flow in your
 browser the first time a tool from this connector is used. After that,
