@@ -1,0 +1,6 @@
+httpx
+mcp<2
+fastapi
+uvicorn
+pymongo
+python-multipart
