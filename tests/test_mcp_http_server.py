@@ -71,9 +71,11 @@ def _reset_db():
 
 def _connect_freshdesk_and_get_access_token() -> str:
     """Runs the real signup -> register -> authorize -> consent -> token
-    exchange, with Freshdesk's verify() call mocked (no real Freshdesk
-    account needed), and returns a working MCP bearer access token."""
-    import httpx
+    exchange (consent no longer asks for any provider's credentials — fixed
+    bug where it hardcoded a Freshdesk form and blocked every other
+    provider's first connect), then connects Freshdesk directly through
+    connections.create_connection (what /connected-accounts does), and
+    returns a working MCP bearer access token."""
     import base64, hashlib
 
     c = TestClient(svr.app)
@@ -82,6 +84,11 @@ def _connect_freshdesk_and_get_access_token() -> str:
     csrf = c.cookies.get("hub_csrf")
     signup_resp = c.post("/signup", data={"email": email, "password": "supersecret123", "next": "", "csrf": csrf})
     assert signup_resp.status_code in (200, 302), signup_resp.text
+    user = hub_auth._users.find_one({"email": email})
+    connections.create_connection(
+        user_id=str(user["_id"]), provider="freshdesk", auth_type="api_key",
+        credentials={"domain": "x.freshdesk.com", "api_key": "fake_key"},
+    )
 
     reg = c.post(
         "/oauth/register",
@@ -100,23 +107,11 @@ def _connect_freshdesk_and_get_access_token() -> str:
     })
     pending = svr._pending_authorizations.find_one({})
 
-    class _FakeResp:
-        status_code = 200
-        headers = {}
-        def json(self):
-            return []
-    orig_request = httpx.request
-    httpx.request = lambda *a, **k: _FakeResp()
-    try:
-        decision_resp = c.post("/oauth/authorize/decision", data={
-            "session_id": pending["session_id"],
-            "csrf": pending["csrf"],
-            "decision": "approve",
-            "freshdesk_domain": "x.freshdesk.com",
-            "freshdesk_api_key": "fake_key",
-        }, follow_redirects=False)
-    finally:
-        httpx.request = orig_request
+    decision_resp = c.post("/oauth/authorize/decision", data={
+        "session_id": pending["session_id"],
+        "csrf": pending["csrf"],
+        "decision": "approve",
+    }, follow_redirects=False)
 
     redirect_location = decision_resp.headers["location"]
     code = redirect_location.split("code=")[1].split("&")[0]

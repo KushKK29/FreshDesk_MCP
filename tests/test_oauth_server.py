@@ -227,8 +227,6 @@ def test_consent_decision_rejects_bad_csrf():
         "session_id": pending["session_id"],
         "csrf": "not-the-real-nonce",
         "decision": "approve",
-        "freshdesk_domain": "x.freshdesk.com",
-        "freshdesk_api_key": "fake",
     })
     assert resp.status_code == 400
 
@@ -251,24 +249,11 @@ def test_grant_records_hub_user_id():
     })
     pending = svr._pending_authorizations.find_one({})
 
-    import httpx
-    class _FakeResp:
-        status_code = 200
-        headers = {}
-        def json(self):
-            return []
-    orig_request = httpx.request
-    httpx.request = lambda *a, **k: _FakeResp()
-    try:
-        resp = c.post("/oauth/authorize/decision", data={
-            "session_id": pending["session_id"],
-            "csrf": pending["csrf"],
-            "decision": "approve",
-            "freshdesk_domain": "x.freshdesk.com",
-            "freshdesk_api_key": "fake",
-        }, follow_redirects=False)
-    finally:
-        httpx.request = orig_request
+    resp = c.post("/oauth/authorize/decision", data={
+        "session_id": pending["session_id"],
+        "csrf": pending["csrf"],
+        "decision": "approve",
+    }, follow_redirects=False)
     assert resp.status_code == 302
     grant = svr._grants.find_one({})
     assert grant is not None
@@ -323,8 +308,6 @@ def test_authorize_decision_requires_matching_hub_session():
         "session_id": pending["session_id"],
         "csrf": pending["csrf"],
         "decision": "approve",
-        "freshdesk_domain": "x.freshdesk.com",
-        "freshdesk_api_key": "fake",
     })
     assert resp.status_code == 400
     assert svr._grants.find_one({}) is None  # no grant should have been issued
@@ -360,55 +343,51 @@ def test_pending_authorization_survives_simulated_restart():
     assert from_db["hub_user_id"]
 
 
-def test_grant_no_longer_stores_plaintext_freshdesk_credentials():
-    """connector-hub plan Task 5: credentials move to the encrypted
-    connections store; the _grants doc itself must carry neither field."""
+def test_consent_no_longer_collects_any_provider_credentials():
+    """Fix: the MCP consent page used to hardcode a Freshdesk domain/API-key
+    form and REQUIRE it to approve any client — breaking first-time connect
+    for every other provider (a ChatGPT user connecting Salesforce only was
+    forced through a Freshdesk form with no way to skip it). The grant is
+    now just "this MCP client may access the hub account"; which providers'
+    tools it sees is decided later, per call, from /connected-accounts —
+    not at consent time, and not tied to any one provider."""
     if not MONGO_AVAILABLE:
         return
     _reset_db()
     reg = client.post(
         "/oauth/register",
-        json={"client_name": "no-plaintext-creds-test", "redirect_uris": ["https://example.com/callback"]},
+        json={"client_name": "no-provider-creds-test", "redirect_uris": ["https://example.com/callback"]},
     ).json()
     c = _signed_in_client()
-    c.get("/oauth/authorize", params={
+    get_resp = c.get("/oauth/authorize", params={
         "client_id": reg["client_id"],
         "redirect_uri": "https://example.com/callback",
         "response_type": "code",
         "code_challenge": "x" * 43,
         "code_challenge_method": "S256",
     })
+    # The consent page itself must not ask for any provider's credentials —
+    # no domain/API-key inputs, no "Freshdesk" in the heading.
+    assert "freshdesk_domain" not in get_resp.text
+    assert "freshdesk_api_key" not in get_resp.text
+    assert "wants to access your Freshdesk tickets" not in get_resp.text
+
     pending = svr._pending_authorizations.find_one({})
 
-    import httpx
-    class _FakeResp:
-        status_code = 200
-        headers = {}
-        def json(self):
-            return []
-    orig_request = httpx.request
-    httpx.request = lambda *a, **k: _FakeResp()
-    try:
-        resp = c.post("/oauth/authorize/decision", data={
-            "session_id": pending["session_id"],
-            "csrf": pending["csrf"],
-            "decision": "approve",
-            "freshdesk_domain": "x.freshdesk.com",
-            "freshdesk_api_key": "super-secret-key",
-        }, follow_redirects=False)
-    finally:
-        httpx.request = orig_request
+    # Approving with ONLY session_id/csrf/decision — no provider fields —
+    # must succeed and issue a grant with no credential-shaped keys at all.
+    resp = c.post("/oauth/authorize/decision", data={
+        "session_id": pending["session_id"],
+        "csrf": pending["csrf"],
+        "decision": "approve",
+    }, follow_redirects=False)
     assert resp.status_code == 302
 
     grant = svr._grants.find_one({})
     assert grant is not None
     assert "freshdesk_api_key" not in grant
     assert "freshdesk_domain" not in grant
-    assert "super-secret-key" not in str(grant)
-
-    conn = connections.get_connection(grant["user_id"], "freshdesk")
-    assert conn is not None
-    assert conn["credentials"]["api_key"] == "super-secret-key"
+    assert connections.get_connection(grant["user_id"], "freshdesk") is None  # consent alone connects nothing
 
 
 if __name__ == "__main__":
@@ -431,6 +410,6 @@ if __name__ == "__main__":
     test_consent_page_escapes_malicious_client_name()
     test_authorize_decision_requires_matching_hub_session()
     test_pending_authorization_survives_simulated_restart()
-    test_grant_no_longer_stores_plaintext_freshdesk_credentials()
+    test_consent_no_longer_collects_any_provider_credentials()
     _reset_db()
     print("all checks passed")

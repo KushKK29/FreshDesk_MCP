@@ -43,15 +43,11 @@ try:
     import auth
     import db as _dbmod
     import connections
-    from adapters.freshdesk import FreshdeskAdapter
 except ImportError:
     from src import freshdesk_client as fd  # package-relative, Vercel (src.oauth_server:app)
     from src import auth
     from src import db as _dbmod
     from src import connections
-    from src.adapters.freshdesk import FreshdeskAdapter
-
-_freshdesk_adapter = FreshdeskAdapter()
 
 app = FastAPI()
 
@@ -405,49 +401,48 @@ _PAGE_STYLES = """
 """
 
 
-def _consent_page(session_id: str, client_name: str, csrf: str, hub_email: str) -> str:
+def _consent_page(session_id: str, client_name: str, csrf: str, hub_email: str, connected_providers: list[str]) -> str:
     # client_name comes from dynamic client registration (any caller, no
     # review) and hub_email from signup — both untrusted, HTML-escaped
     # before interpolation so neither can break out of the markup.
     client_name = html.escape(client_name)
     hub_email = html.escape(hub_email)
+    if connected_providers:
+        providers_line = f"It will see tools for: <strong>{html.escape(', '.join(connected_providers))}</strong> — whatever you've connected on the Connected accounts page."
+    else:
+        providers_line = 'You haven\'t connected any providers yet — connect one from <a href="/connected-accounts" style="color:var(--accent);">Connected accounts</a> after approving, and its tools will appear automatically.'
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connect to Freshdesk</title>
+  <title>Connect to Connector Hub</title>
   <style>{_PAGE_STYLES}</style>
 </head>
 <body>
   <div class="card">
     <div class="logo-row">
       <div class="logo-badge">FD</div>
-      <div class="logo-text">Freshdesk Connector</div>
+      <div class="logo-text">Connector Hub</div>
     </div>
-    <h1>{client_name} wants to access your Freshdesk tickets</h1>
-    <p class="subtitle">Signed in as {hub_email}. Enter your Freshdesk domain and API key to grant this client read-only access.</p>
+    <h1>{client_name} wants to access your Connector Hub account</h1>
+    <p class="subtitle">Signed in as {hub_email}.</p>
     <div class="scope-box">
       <strong>This will allow {client_name} to:</strong>
       <ul>
-        <li>List and search your support tickets</li>
-        <li>View full ticket details</li>
+        <li>Use tools for every provider you've connected (Freshdesk, Salesforce, HubSpot, etc.)</li>
       </ul>
-      It will <strong>not</strong> be able to create, edit, or delete anything in Freshdesk.
+      {providers_line}
     </div>
     <form method="post" action="/oauth/authorize/decision">
       <input type="hidden" name="session_id" value="{session_id}">
       <input type="hidden" name="csrf" value="{csrf}">
-      <label for="freshdesk_domain">Freshdesk domain</label>
-      <input id="freshdesk_domain" name="freshdesk_domain" placeholder="yourcompany.freshdesk.com" required autocomplete="off">
-      <label for="freshdesk_api_key">Freshdesk API key</label>
-      <input id="freshdesk_api_key" name="freshdesk_api_key" type="password" placeholder="Found under Profile Settings → API Key" required autocomplete="off">
       <div class="actions">
         <button type="submit" name="decision" value="deny">Deny</button>
         <button type="submit" name="decision" value="approve">Approve access</button>
       </div>
     </form>
-    <p class="footer-note">Your Freshdesk credentials are used only to verify access and are never shared with {client_name} directly.</p>
+    <p class="footer-note">Provider credentials are managed separately on Connected accounts and are never shared with {client_name}.</p>
   </div>
 </body>
 </html>"""
@@ -522,7 +517,8 @@ def authorize(
         "hub_user_id": hub_user.user_id,
         "created_at": time.time(),
     })
-    return HTMLResponse(_consent_page(session_id, client["client_name"], csrf, hub_user.email))
+    connected_providers = [c["provider"] for c in connections.list_connections_for_user(hub_user.user_id) if c["status"] == "active"]
+    return HTMLResponse(_consent_page(session_id, client["client_name"], csrf, hub_user.email, connected_providers))
 
 
 @app.post("/oauth/authorize/decision")
@@ -531,15 +527,13 @@ def authorize_decision(
     session_id: str = Form(...),
     csrf: str = Form(...),
     decision: str = Form(...),
-    freshdesk_domain: str = Form(""),
-    freshdesk_api_key: str = Form(""),
 ):
     # The GET that rendered this form already required a hub login — the
     # POST that actually issues the grant must require it too, and must be
     # the SAME hub user the pending record was created for. Without this,
     # anyone who obtains a leaked session_id+csrf pair (Referer header,
-    # shared browser, server logs) could submit their own Freshdesk
-    # credentials and mint a grant tied to the victim's hub_user_id.
+    # shared browser, server logs) could mint a grant tied to the victim's
+    # hub_user_id.
     hub_user = auth.resolve_session(request.cookies.get(login_pages.SESSION_COOKIE_NAME))
     oauth_req = _pending_authorizations.find_one_and_delete({"session_id": session_id})
     # Single-use: find_one_and_delete both reads and consumes the pending
@@ -563,39 +557,13 @@ def authorize_decision(
         target_params["error"] = "access_denied"
         return RedirectResponse(f"{oauth_req['redirect_uri']}?{urlencode(target_params)}", status_code=302)
 
-    # Freshdesk domain is attacker-controlled input used to build an outbound
-    # request URL (SSRF surface) — validated before anything else touches it.
-    from adapters.freshdesk import validate_freshdesk_domain
-    validated_domain = validate_freshdesk_domain(freshdesk_domain)
-    if not validated_domain:
-        return HTMLResponse(_error_page("Invalid Freshdesk domain", "That doesn't look like a valid Freshdesk domain (expected something.freshdesk.com)."), status_code=400)
-    freshdesk_domain = validated_domain
-
-    # Verify the Freshdesk credentials actually work before issuing a code —
-    # same check as before, now via the adapter (adapters.freshdesk.verify)
-    # instead of an inline httpx call, so it's reusable at any future
-    # Freshdesk connect point, not duplicated here.
-    from adapters import Connection
-    try:
-        _freshdesk_adapter.verify(Connection(
-            user_id=oauth_req["hub_user_id"], provider="freshdesk", auth_type="api_key",
-            credentials={"domain": freshdesk_domain, "api_key": freshdesk_api_key},
-        ))
-    except fd.FreshdeskError as exc:
-        if "401" in str(exc):
-            return HTMLResponse(_error_page("Couldn't verify your credentials", "That domain and API key combination was rejected by Freshdesk. Double-check both and try again."), status_code=401)
-        return HTMLResponse(_error_page("Connection failed", "Freshdesk returned an unexpected error. Please try again in a moment."), status_code=502)
-
-    # Credentials now live only in the connections store (encrypted), keyed
-    # by hub user + provider — not embedded in the _grants doc anymore
-    # (connector-hub plan Task 5: credential split from the OAuth grant).
-    connections.create_connection(
-        user_id=oauth_req["hub_user_id"],
-        provider="freshdesk",
-        auth_type="api_key",
-        credentials={"domain": freshdesk_domain, "api_key": freshdesk_api_key},
-    )
-
+    # No provider credentials are collected here anymore — this grant is
+    # the MCP client's access to the hub account, nothing more. Which
+    # providers' tools it can see depends entirely on what's connected on
+    # /connected-accounts at call time (mcp_http_server.py), not on anything
+    # decided during this consent step (connector-hub plan: credential split
+    # from the OAuth grant, extended to cover every provider, not just
+    # Freshdesk's original M0a design).
     code = _rand_token("code_")
     _grants.insert_one({
         "code_hash": _sha256(code),
