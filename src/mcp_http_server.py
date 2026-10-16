@@ -33,11 +33,15 @@ try:
     import adapters
     import connections
     import confirm_tokens
+    import crm_contacts
+    import crm_ops  # noqa: F401 — import-time side effect registers CrmOpsAdapter into adapters.ADAPTERS
     from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 except ImportError:
     from src import adapters
     from src import connections
     from src import confirm_tokens
+    from src import crm_contacts
+    from src import crm_ops  # noqa: F401
     from src.oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 
 adapters.register_all_adapters()
@@ -108,9 +112,8 @@ def _active_adapter_tools_for_user(user_id: str) -> list[tuple[adapters.ToolSpec
     enabled connections expose — PRD F3: tools/list reflects only active,
     enabled connections, not every registered provider."""
     out = []
-    for conn_row in connections.list_connections_for_user(user_id):
-        if conn_row["status"] != "active":
-            continue
+    active_rows = [r for r in connections.list_connections_for_user(user_id) if r["status"] == "active"]
+    for conn_row in active_rows:
         provider = conn_row["provider"]
         adapter = adapters.ADAPTERS.get(provider)
         if not adapter:
@@ -120,6 +123,15 @@ def _active_adapter_tools_for_user(user_id: str) -> list[tuple[adapters.ToolSpec
             if enabled is not None and spec.name not in enabled:
                 continue
             out.append((spec, provider))
+
+    # crm_ops has no OAuth connection of its own (it only reads connections
+    # the user already made to real CRM providers) — exposed whenever at
+    # least one of those is active, same PRD F3 gate real providers go
+    # through above (not just "a row for it exists somewhere").
+    if any(r["provider"] in crm_contacts.CRM_PROVIDERS for r in active_rows):
+        crm_ops_adapter = adapters.ADAPTERS.get("crm_ops")
+        if crm_ops_adapter:
+            out.extend((spec, "crm_ops") for spec in crm_ops_adapter.tools())
     return out
 
 
@@ -200,6 +212,12 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
             if not supplied_token or not confirm_tokens.consume(supplied_token, grant["user_id"], provider, name, call_args):
                 new_token = confirm_tokens.issue(grant["user_id"], provider, name, call_args)
                 return {"preview": call_args, "confirm_token": new_token, "message": f"This action ({name}) requires confirmation. Call it again with this confirm_token to execute."}
+
+        if provider == "crm_ops":
+            # No credentials of its own — crm_ops.call() reads conn.user_id
+            # only, to re-fetch the other providers' already-stored connections.
+            result = adapters.ADAPTERS["crm_ops"].call(name, call_args, adapters.Connection(user_id=grant["user_id"], provider="crm_ops", auth_type="none", credentials={}))
+            return result
 
         conn_row = connections.get_connection(grant["user_id"], provider)
         if not conn_row:

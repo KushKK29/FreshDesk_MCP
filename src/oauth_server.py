@@ -678,12 +678,14 @@ try:
     import connected_accounts
     import connect_oauth
     import provider_detail
+    import crm_ops_page
     from adapters import register_all_adapters
 except ImportError:
     from src import login_pages
     from src import connected_accounts
     from src import connect_oauth
     from src import provider_detail
+    from src import crm_ops_page
     from src.adapters import register_all_adapters
 
 register_all_adapters()  # every adapter module registers itself into ADAPTERS — needed by connect_oauth.py's verify() call and mcp_http_server.py's tool dispatch, whichever entrypoint runs first
@@ -691,3 +693,4 @@ app.include_router(login_pages.router)
 app.include_router(connected_accounts.router)
 app.include_router(provider_detail.router)
 app.include_router(connect_oauth.router)
+app.include_router(crm_ops_page.router)

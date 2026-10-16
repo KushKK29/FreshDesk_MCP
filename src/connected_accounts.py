@@ -111,6 +111,7 @@ _EXTRA_STYLES = """
 def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connected") -> str:
     nav_items = [
         ("connected", "Connected accounts", "/connected-accounts"),
+        ("crm-ops", "CRM Ops", "/crm-ops"),
     ]
     nav_html = "".join(
         f'<a href="{href}" class="nav-item {"active" if key == active_nav else ""}">{html.escape(label)}</a>'
