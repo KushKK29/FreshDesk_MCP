@@ -164,6 +164,21 @@ async def _list_tools_for_current_caller() -> list[MCPTool]:
     return [_tool_spec_to_mcp_tool(spec) for spec, _provider in _active_adapter_tools_for_user(grant["user_id"])]
 
 
+def _looks_like_auth_error(exc: Exception) -> bool:
+    # Every provider client raises a generic {Provider}Error with the HTTP
+    # status embedded in the message (f"{method} {path} -> {status}: ..."),
+    # not a typed exception per status code — matching the string is what
+    # the rest of this codebase already does for the same reason.
+    message = str(exc)
+    return "-> 401" in message or "INVALID_SESSION_ID" in message
+
+
+def _refresh_and_persist(adapter: adapters.ProviderAdapter, conn: adapters.Connection, provider: str) -> adapters.Connection:
+    refreshed = adapter.refresh(conn)
+    connections.update_credentials(conn.user_id, provider, refreshed.credentials, refreshed.expires_at)
+    return refreshed
+
+
 async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
     token = _current_access_token()
     grant = _grant_for_token(token)
@@ -197,7 +212,36 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
             credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
         )
         adapter = adapters.ADAPTERS[provider]
-        result = adapter.call(name, call_args, conn)
+
+        # Proactive refresh: OAuth access tokens are short-lived (Salesforce's
+        # especially) and nothing else in this codebase ever refreshed them —
+        # confirmed live: a token connected hours earlier failed every call
+        # with INVALID_SESSION_ID. Refresh ahead of expiry when we know it,
+        # and reactively below on an actual 401/expired-session error for
+        # providers whose expiry we don't track.
+        if conn.auth_type == "oauth2" and conn.expires_at and time.time() > conn.expires_at - 120:
+            try:
+                conn = _refresh_and_persist(adapter, conn, provider)
+            except Exception as exc:
+                connections.mark_needs_reauth(grant["user_id"], provider)
+                raise ToolError(f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.") from exc
+
+        try:
+            result = adapter.call(name, call_args, conn)
+        except Exception as exc:
+            if conn.auth_type != "oauth2" or not _looks_like_auth_error(exc):
+                raise
+            # Reactive refresh: one retry, not a loop (same ceiling as the
+            # rest of this codebase's HTTP clients) — if the refreshed token
+            # still fails, the connection is marked needs_reauth and the
+            # error surfaces to the caller instead of retrying forever.
+            try:
+                conn = _refresh_and_persist(adapter, conn, provider)
+            except Exception:
+                connections.mark_needs_reauth(grant["user_id"], provider)
+                raise ToolError(f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.") from exc
+            result = adapter.call(name, call_args, conn)
+
         connections.touch_last_used(grant["user_id"], provider)
         return result
 

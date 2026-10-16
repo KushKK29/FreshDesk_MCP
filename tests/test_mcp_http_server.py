@@ -10,6 +10,7 @@ skips cleanly if mongod isn't running.
 import os
 import secrets
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -315,6 +316,147 @@ def test_non_gated_tool_executes_without_confirm_token():
     assert "confirm_token" not in result
 
 
+def _connect_asana_and_get_access_token(expires_at: float | None = None) -> tuple[str, str]:
+    """Same shape as _connect_freshdesk_and_get_access_token, but with an
+    OAuth2 Asana connection (needed to exercise refresh — Freshdesk is
+    API-key auth and has no refresh path)."""
+    import base64, hashlib
+
+    c = TestClient(svr.app)
+    email = f"refreshtest-{secrets.token_hex(4)}@example.com"
+    c.get("/signup")
+    csrf = c.cookies.get("hub_csrf")
+    signup_resp = c.post("/signup", data={"email": email, "password": "supersecret123", "next": "", "csrf": csrf}, follow_redirects=False)
+    assert signup_resp.status_code == 302, signup_resp.text
+    user = hub_auth._users.find_one({"email": email})
+    user_id = str(user["_id"])
+    connections.create_connection(
+        user_id=user_id, provider="asana", auth_type="oauth2",
+        credentials={"access_token": "stale-token", "refresh_token": "refresh-token-abc"},
+        expires_at=expires_at,
+    )
+
+    reg = c.post("/oauth/register", json={"client_name": "refresh-test-client", "redirect_uris": ["https://example.com/callback"]}).json()
+    verifier = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    c.get("/oauth/authorize", params={
+        "client_id": reg["client_id"], "redirect_uri": "https://example.com/callback",
+        "response_type": "code", "code_challenge": challenge, "code_challenge_method": "S256",
+    })
+    pending = svr._pending_authorizations.find_one({})
+    decision_resp = c.post("/oauth/authorize/decision", data={
+        "session_id": pending["session_id"], "csrf": pending["csrf"], "decision": "approve",
+    }, follow_redirects=False)
+    code = decision_resp.headers["location"].split("code=")[1].split("&")[0]
+    token_resp = c.post("/oauth/token", data={
+        "grant_type": "authorization_code", "code": code, "code_verifier": verifier,
+        "redirect_uri": "https://example.com/callback", "client_id": reg["client_id"],
+    })
+    return token_resp.json()["access_token"], user_id
+
+
+def test_expired_token_refreshes_proactively_before_call():
+    """Fix: nothing ever called adapter.refresh() — a token connected hours
+    earlier failed every call with an auth error (confirmed live on
+    Salesforce: INVALID_SESSION_ID). A connection whose expires_at is in the
+    past must be refreshed BEFORE the call, not just reactively on failure."""
+    if not MONGO_AVAILABLE:
+        return
+    _reset_db()
+    access_token, user_id = _connect_asana_and_get_access_token(expires_at=time.time() - 60)  # already expired
+
+    import httpx
+    calls = {"refresh": 0, "api": []}
+    orig_post = httpx.post
+    orig_request = httpx.request
+    def fake_post(url, **kwargs):
+        if "oauth_token" in url:
+            calls["refresh"] += 1
+            return httpx.Response(200, json={"access_token": "fresh-token", "expires_in": 3600}, request=httpx.Request("POST", url))
+        return orig_post(url, **kwargs)
+    def fake_request(method, url, **kwargs):
+        calls["api"].append(kwargs.get("headers", {}).get("Authorization"))
+        return httpx.Response(200, json={"data": []}, request=httpx.Request(method, url))
+    httpx.post = fake_post
+    httpx.request = fake_request
+    try:
+        result = _call_as(access_token, "asana_list_tasks", {"workspace": "w1"})
+    finally:
+        httpx.post = orig_post
+        httpx.request = orig_request
+
+    assert calls["refresh"] == 1, "expired token should trigger exactly one refresh call before the API call"
+    assert calls["api"][-1] == "Bearer fresh-token", "the API call must use the refreshed token, not the stale one"
+    assert result == {"results": []}
+
+    conn = connections.get_connection(user_id, "asana")
+    assert conn["credentials"]["access_token"] == "fresh-token"  # persisted back to the store
+
+
+def test_401_triggers_one_reactive_refresh_and_retry():
+    """No expires_at tracked (or it hasn't passed yet) but the provider
+    itself rejects the token — must refresh once and retry, not loop."""
+    if not MONGO_AVAILABLE:
+        return
+    _reset_db()
+    access_token, user_id = _connect_asana_and_get_access_token(expires_at=None)
+
+    import httpx
+    calls = {"refresh": 0, "api": 0}
+    orig_post = httpx.post
+    orig_request = httpx.request
+    def fake_post(url, **kwargs):
+        if "oauth_token" in url:
+            calls["refresh"] += 1
+            return httpx.Response(200, json={"access_token": "fresh-token", "expires_in": 3600}, request=httpx.Request("POST", url))
+        return orig_post(url, **kwargs)
+    def fake_request(method, url, **kwargs):
+        calls["api"] += 1
+        if calls["api"] == 1:
+            return httpx.Response(401, json={"errors": [{"message": "Not Authorized"}]}, request=httpx.Request(method, url))
+        return httpx.Response(200, json={"data": []}, request=httpx.Request(method, url))
+    httpx.post = fake_post
+    httpx.request = fake_request
+    try:
+        result = _call_as(access_token, "asana_list_tasks", {"workspace": "w1"})
+    finally:
+        httpx.post = orig_post
+        httpx.request = orig_request
+
+    assert calls["refresh"] == 1
+    assert calls["api"] == 2, "exactly one retry after refresh, not a loop"
+    assert result == {"results": []}
+
+
+def test_refresh_failure_marks_needs_reauth_not_infinite_retry():
+    if not MONGO_AVAILABLE:
+        return
+    _reset_db()
+    access_token, user_id = _connect_asana_and_get_access_token(expires_at=time.time() - 60)
+
+    import httpx
+    orig_post = httpx.post
+    orig_request = httpx.request
+    def fake_post(url, **kwargs):
+        if "oauth_token" in url:
+            return httpx.Response(400, json={"error": "invalid_grant"}, request=httpx.Request("POST", url))
+        return orig_post(url, **kwargs)
+    httpx.post = fake_post
+    httpx.request = lambda method, url, **kwargs: httpx.Response(200, json={"data": []}, request=httpx.Request(method, url))
+    try:
+        try:
+            _call_as(access_token, "asana_list_tasks", {"workspace": "w1"})
+            assert False, "should have raised when refresh itself fails"
+        except Exception:
+            pass
+    finally:
+        httpx.post = orig_post
+        httpx.request = orig_request
+
+    conn = connections.list_connections_for_user(user_id)
+    assert any(c["provider"] == "asana" and c["status"] == "needs_reauth" for c in conn)
+
+
 if __name__ == "__main__":
     if not MONGO_AVAILABLE:
         print("SKIPPED: no local MongoDB reachable at mongodb://localhost:27017")
@@ -325,5 +467,8 @@ if __name__ == "__main__":
     test_requires_confirm_tool_previews_on_first_call_and_executes_on_second()
     test_requires_confirm_token_bound_to_arguments()
     test_non_gated_tool_executes_without_confirm_token()
+    test_expired_token_refreshes_proactively_before_call()
+    test_401_triggers_one_reactive_refresh_and_retry()
+    test_refresh_failure_marks_needs_reauth_not_infinite_retry()
     _reset_db()
     print("all checks passed")
