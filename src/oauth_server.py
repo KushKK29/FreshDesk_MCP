@@ -28,6 +28,7 @@ other option the assignment allows) — built this way because the ask was
 specifically for an OAuth 2.1 flow in the Humantic MCP server's style.
 """
 import hashlib
+import html
 import os
 import secrets
 import time
@@ -36,12 +37,21 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pymongo import MongoClient
 
 try:
     import freshdesk_client as fd  # flat import, local dev (--app-dir src)
+    import auth
+    import db as _dbmod
+    import connections
+    from adapters.freshdesk import FreshdeskAdapter
 except ImportError:
     from src import freshdesk_client as fd  # package-relative, Vercel (src.oauth_server:app)
+    from src import auth
+    from src import db as _dbmod
+    from src import connections
+    from src.adapters.freshdesk import FreshdeskAdapter
+
+_freshdesk_adapter = FreshdeskAdapter()
 
 app = FastAPI()
 
@@ -55,12 +65,19 @@ BASE_URL = os.environ.get("OAUTH_BASE_URL", "http://localhost:8004").rstrip("/")
 CODE_TTL_SECONDS = 60
 ACCESS_TTL_SECONDS = 60 * 60
 REFRESH_TTL_SECONDS = 90 * 24 * 60 * 60
+PENDING_AUTH_TTL_SECONDS = 600  # consent-flow window: how long a pending /oauth/authorize request stays valid
 
-_mongo = MongoClient(MONGO_URI)
-_db = _mongo["freshdesk_connector"]
+_db = _dbmod.db  # shared connection/db (src/db.py) — one pool for the whole connector, not one per module
 _clients = _db["oauth_clients"]       # dynamically registered MCP clients
 _grants = _db["oauth_grants"]         # one doc per authorization: code -> tokens lifecycle
-_sessions = {}  # in-memory consent-flow session, keyed by a short-lived cookie-less session id
+_pending_authorizations = _db["pending_authorizations"]
+# Was an in-memory `_sessions = {}` dict — lost every pending consent flow on
+# a restart and couldn't be shared across instances (PLAN.md Limitations).
+# Now Mongo-backed, same way _clients/_grants are; a TTL index does the
+# cleanup, and _authorize_decision still checks created_at explicitly below
+# since a TTL index can lag its target by up to ~60s (Mongo docs) — that lag
+# is fine for cleanup, not for the correctness boundary.
+_pending_authorizations.create_index("created_at", expireAfterSeconds=PENDING_AUTH_TTL_SECONDS)
 
 
 def _sha256(value: str) -> str:
@@ -388,7 +405,12 @@ _PAGE_STYLES = """
 """
 
 
-def _consent_page(session_id: str, client_name: str) -> str:
+def _consent_page(session_id: str, client_name: str, csrf: str, hub_email: str) -> str:
+    # client_name comes from dynamic client registration (any caller, no
+    # review) and hub_email from signup — both untrusted, HTML-escaped
+    # before interpolation so neither can break out of the markup.
+    client_name = html.escape(client_name)
+    hub_email = html.escape(hub_email)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -404,7 +426,7 @@ def _consent_page(session_id: str, client_name: str) -> str:
       <div class="logo-text">Freshdesk Connector</div>
     </div>
     <h1>{client_name} wants to access your Freshdesk tickets</h1>
-    <p class="subtitle">Sign in with your Freshdesk domain and API key to grant read-only access.</p>
+    <p class="subtitle">Signed in as {hub_email}. Enter your Freshdesk domain and API key to grant this client read-only access.</p>
     <div class="scope-box">
       <strong>This will allow {client_name} to:</strong>
       <ul>
@@ -415,6 +437,7 @@ def _consent_page(session_id: str, client_name: str) -> str:
     </div>
     <form method="post" action="/oauth/authorize/decision">
       <input type="hidden" name="session_id" value="{session_id}">
+      <input type="hidden" name="csrf" value="{csrf}">
       <label for="freshdesk_domain">Freshdesk domain</label>
       <input id="freshdesk_domain" name="freshdesk_domain" placeholder="yourcompany.freshdesk.com" required autocomplete="off">
       <label for="freshdesk_api_key">Freshdesk API key</label>
@@ -424,13 +447,18 @@ def _consent_page(session_id: str, client_name: str) -> str:
         <button type="submit" name="decision" value="approve">Approve access</button>
       </div>
     </form>
-    <p class="footer-note">Your credentials are used only to verify access and are never shared with {client_name} directly.</p>
+    <p class="footer-note">Your Freshdesk credentials are used only to verify access and are never shared with {client_name} directly.</p>
   </div>
 </body>
 </html>"""
 
 
 def _error_page(title: str, message: str) -> str:
+    # Escaped here, not at each call site — callers sometimes interpolate
+    # untrusted path/query params (e.g. connect_oauth.py's provider) into
+    # title/message, so this is the one place that must not be skippable.
+    title = html.escape(title)
+    message = html.escape(message)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -451,6 +479,7 @@ def _error_page(title: str, message: str) -> str:
 
 @app.get("/oauth/authorize")
 def authorize(
+    request: Request,
     client_id: str = Query(...),
     redirect_uri: str = Query(...),
     response_type: str = Query(...),
@@ -470,27 +499,60 @@ def authorize(
     ):
         return HTMLResponse(_error_page("Invalid authorization request", "This link is invalid or has expired. Start again from your MCP client."), status_code=400)
 
+    # Hub login gate: the MCP client's OAuth request only proceeds to the
+    # Freshdesk consent screen once there's a real hub account behind it —
+    # mirrors Humantic's own mcp-oauth.js, which checks req.session.isLoggedin
+    # before rendering its MCP consent page and redirects to the login/home
+    # page otherwise. Here that's a stateless redirect (no server session
+    # framework in FastAPI by default) back to this same URL after login.
+    hub_user = auth.resolve_session(request.cookies.get(login_pages.SESSION_COOKIE_NAME))
+    if not hub_user:
+        return RedirectResponse(f"/login?{urlencode({'next': str(request.url)})}", status_code=302)
+
     session_id = secrets.token_urlsafe(16)
-    _sessions[session_id] = {
+    csrf = secrets.token_urlsafe(16)
+    _pending_authorizations.insert_one({
+        "session_id": session_id,
         "client_id": client_id,
         "client_name": client["client_name"],
         "redirect_uri": redirect_uri,
         "code_challenge": code_challenge,
         "state": state,
+        "csrf": csrf,
+        "hub_user_id": hub_user.user_id,
         "created_at": time.time(),
-    }
-    return HTMLResponse(_consent_page(session_id, client["client_name"]))
+    })
+    return HTMLResponse(_consent_page(session_id, client["client_name"], csrf, hub_user.email))
 
 
 @app.post("/oauth/authorize/decision")
 def authorize_decision(
+    request: Request,
     session_id: str = Form(...),
+    csrf: str = Form(...),
     decision: str = Form(...),
     freshdesk_domain: str = Form(""),
     freshdesk_api_key: str = Form(""),
 ):
-    oauth_req = _sessions.pop(session_id, None)
-    if not oauth_req or time.time() - oauth_req["created_at"] > 600:
+    # The GET that rendered this form already required a hub login — the
+    # POST that actually issues the grant must require it too, and must be
+    # the SAME hub user the pending record was created for. Without this,
+    # anyone who obtains a leaked session_id+csrf pair (Referer header,
+    # shared browser, server logs) could submit their own Freshdesk
+    # credentials and mint a grant tied to the victim's hub_user_id.
+    hub_user = auth.resolve_session(request.cookies.get(login_pages.SESSION_COOKIE_NAME))
+    oauth_req = _pending_authorizations.find_one_and_delete({"session_id": session_id})
+    # Single-use: find_one_and_delete both reads and consumes the pending
+    # record atomically, so the same consent page can't be submitted twice.
+    if (
+        not oauth_req
+        or time.time() - oauth_req["created_at"] > PENDING_AUTH_TTL_SECONDS
+        or csrf != oauth_req["csrf"]
+        or not hub_user
+        or hub_user.user_id != oauth_req["hub_user_id"]
+    ):
+        # Deliberately one error for "expired" and "bad csrf" — distinguishing
+        # them in the response would tell an attacker which guess was closer.
         raise HTTPException(status_code=400, detail="invalid or expired consent session")
 
     target_params = {}
@@ -501,17 +563,38 @@ def authorize_decision(
         target_params["error"] = "access_denied"
         return RedirectResponse(f"{oauth_req['redirect_uri']}?{urlencode(target_params)}", status_code=302)
 
-    # Verify the Freshdesk credentials actually work before issuing a code.
-    resp = httpx.get(
-        f"https://{freshdesk_domain}/api/v2/tickets",
-        auth=(freshdesk_api_key, "X"),
-        params={"per_page": 1},
-        timeout=15,
+    # Freshdesk domain is attacker-controlled input used to build an outbound
+    # request URL (SSRF surface) — validated before anything else touches it.
+    from adapters.freshdesk import validate_freshdesk_domain
+    validated_domain = validate_freshdesk_domain(freshdesk_domain)
+    if not validated_domain:
+        return HTMLResponse(_error_page("Invalid Freshdesk domain", "That doesn't look like a valid Freshdesk domain (expected something.freshdesk.com)."), status_code=400)
+    freshdesk_domain = validated_domain
+
+    # Verify the Freshdesk credentials actually work before issuing a code —
+    # same check as before, now via the adapter (adapters.freshdesk.verify)
+    # instead of an inline httpx call, so it's reusable at any future
+    # Freshdesk connect point, not duplicated here.
+    from adapters import Connection
+    try:
+        _freshdesk_adapter.verify(Connection(
+            user_id=oauth_req["hub_user_id"], provider="freshdesk", auth_type="api_key",
+            credentials={"domain": freshdesk_domain, "api_key": freshdesk_api_key},
+        ))
+    except fd.FreshdeskError as exc:
+        if "401" in str(exc):
+            return HTMLResponse(_error_page("Couldn't verify your credentials", "That domain and API key combination was rejected by Freshdesk. Double-check both and try again."), status_code=401)
+        return HTMLResponse(_error_page("Connection failed", "Freshdesk returned an unexpected error. Please try again in a moment."), status_code=502)
+
+    # Credentials now live only in the connections store (encrypted), keyed
+    # by hub user + provider — not embedded in the _grants doc anymore
+    # (connector-hub plan Task 5: credential split from the OAuth grant).
+    connections.create_connection(
+        user_id=oauth_req["hub_user_id"],
+        provider="freshdesk",
+        auth_type="api_key",
+        credentials={"domain": freshdesk_domain, "api_key": freshdesk_api_key},
     )
-    if resp.status_code == 401:
-        return HTMLResponse(_error_page("Couldn't verify your credentials", "That domain and API key combination was rejected by Freshdesk. Double-check both and try again."), status_code=401)
-    if resp.status_code >= 400:
-        return HTMLResponse(_error_page("Connection failed", f"Freshdesk returned an unexpected error (status {resp.status_code}). Please try again in a moment."), status_code=502)
 
     code = _rand_token("code_")
     _grants.insert_one({
@@ -520,8 +603,7 @@ def authorize_decision(
         "redirect_uri": oauth_req["redirect_uri"],
         "code_challenge": oauth_req["code_challenge"],
         "code_expires_at": time.time() + CODE_TTL_SECONDS,
-        "freshdesk_domain": freshdesk_domain,
-        "freshdesk_api_key": freshdesk_api_key,  # see module docstring: demo-only plaintext storage
+        "user_id": oauth_req["hub_user_id"],  # the hub account that approved this grant — PRD Section 7.1
         "access_token_hash": None,
         "refresh_token_hash": None,
         "revoked_at": None,
@@ -611,10 +693,16 @@ async def revoke(request: Request):
     form = await request.form()
     tok = form.get("token")
     if tok:
+        grant = _grants.find_one({"$or": [{"access_token_hash": _sha256(tok)}, {"refresh_token_hash": _sha256(tok)}]})
         _grants.update_many(
             {"$or": [{"access_token_hash": _sha256(tok)}, {"refresh_token_hash": _sha256(tok)}]},
             {"$set": {"revoked_at": time.time()}},
         )
+        if grant:
+            # PRD F6: revoking the MCP OAuth grant also disconnects the
+            # provider connection it was gating — deletes the encrypted
+            # credentials, not just the hub-session token.
+            connections.disconnect(grant["user_id"], "freshdesk")
     return JSONResponse(status_code=200, content={})
 
 
@@ -643,7 +731,10 @@ def _resolve_grant(authorization_header: str | None) -> dict:
 )
 def list_tickets(request: Request, status: str | None = None, updated_since: str | None = None, page: int = 1):
     grant = _resolve_grant(request.headers.get("authorization"))
-    return fd.list_tickets_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], status, updated_since, page)
+    conn = connections.get_connection(grant["user_id"], "freshdesk")
+    if not conn:
+        raise HTTPException(status_code=409, detail="Freshdesk is not connected or needs reauthorization")
+    return fd.list_tickets_for(conn["credentials"]["domain"], conn["credentials"]["api_key"], status, updated_since, page)
 
 
 @app.get(
@@ -655,7 +746,10 @@ def list_tickets(request: Request, status: str | None = None, updated_since: str
 )
 def get_ticket(ticket_id: int, request: Request, include: str | None = None):
     grant = _resolve_grant(request.headers.get("authorization"))
-    return fd.get_ticket_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], ticket_id, include)
+    conn = connections.get_connection(grant["user_id"], "freshdesk")
+    if not conn:
+        raise HTTPException(status_code=409, detail="Freshdesk is not connected or needs reauthorization")
+    return fd.get_ticket_for(conn["credentials"]["domain"], conn["credentials"]["api_key"], ticket_id, include)
 
 
 @app.get(
@@ -666,4 +760,29 @@ def get_ticket(ticket_id: int, request: Request, include: str | None = None):
 )
 def search_tickets(request: Request, query: str):
     grant = _resolve_grant(request.headers.get("authorization"))
-    return fd.search_tickets_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], query)
+    conn = connections.get_connection(grant["user_id"], "freshdesk")
+    if not conn:
+        raise HTTPException(status_code=409, detail="Freshdesk is not connected or needs reauthorization")
+    return fd.search_tickets_for(conn["credentials"]["domain"], conn["credentials"]["api_key"], query)
+
+
+# ── Hub login routes (signup/login/logout) ──────────────────────────────
+# Imported and mounted last, not at module top: login_pages.py imports
+# _PAGE_STYLES and _error_page from this module, so importing it earlier
+# (before those names exist in this module's namespace) would be a circular
+# import that fails at startup.
+try:
+    import login_pages
+    import connected_accounts
+    import connect_oauth
+    from adapters import register_all_adapters
+except ImportError:
+    from src import login_pages
+    from src import connected_accounts
+    from src import connect_oauth
+    from src.adapters import register_all_adapters
+
+register_all_adapters()  # every adapter module registers itself into ADAPTERS — needed by connect_oauth.py's verify() call and mcp_http_server.py's tool dispatch, whichever entrypoint runs first
+app.include_router(login_pages.router)
+app.include_router(connected_accounts.router)
+app.include_router(connect_oauth.router)

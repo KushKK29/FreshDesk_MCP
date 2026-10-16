@@ -170,6 +170,12 @@ the test that was actually run to validate the OAuth build (see
 the voice agent does, so this script is the evidence).
 
 ## Limitations & long-term fix
+
+This connector is evolving into a multi-provider connector hub — see
+`.claude/prds/crm-ticketing-connector-hub.prd.md` for the full plan. Two of
+the limitations below (no real user accounts, in-memory consent sessions)
+were fixed in that PRD's M0a milestone; the rest remain open.
+
 - Read-only. Long-term: add `update_ticket`/`add_note` tools behind an
   explicit write-scope flag + human-in-the-loop confirmation before any
   Agent Studio agent can mutate a live ticket.
@@ -183,18 +189,20 @@ the voice agent does, so this script is the evidence).
   encryption with a KMS key), or move to a proper Freshdesk OAuth2 app
   integration (Freshdesk does support being an OAuth provider itself) so we
   never hold a long-lived Freshdesk credential at all, only short-lived
-  Freshdesk-issued tokens.
-- **No real user accounts** — the Freshdesk API key doubles as the login
-  credential, which means anyone with a given Freshdesk API key can connect
-  as "that identity" with no additional factor. Fine for a demo; production
-  would add a real account layer (email verification, password or SSO) in
-  front of the Freshdesk-linking step, so the two identities (our platform
-  account vs. the linked Freshdesk account) are separate.
-- **In-memory consent sessions** (`_sessions` dict in `oauth_server.py`) —
-  survives fine for a single server instance but doesn't survive a restart
-  mid-flow, and won't work if ever scaled to multiple instances behind a
-  load balancer. Long-term: move this into MongoDB too (short TTL collection)
-  alongside the grants.
+  Freshdesk-issued tokens. (Planned for the PRD's M0b milestone.)
+- ~~**No real user accounts**~~ — **Fixed (M0a).** `src/auth.py` now adds a
+  real hub account (email + bcrypt password hash), separate from any
+  Freshdesk credential. `/oauth/authorize` redirects to `/login` until the
+  visitor has a valid hub session; every `_grants` document now carries the
+  hub `user_id` that approved it. The Freshdesk API key is still what's
+  verified at the consent screen — that part is unchanged — but it's no
+  longer the *login* itself.
+- ~~**In-memory consent sessions**~~ — **Fixed (M0a).** The `_sessions` dict
+  is gone; pending `/oauth/authorize` requests are now a Mongo collection
+  (`pending_authorizations`) with a TTL index, so a restart or a second
+  instance behind a load balancer no longer loses a flow mid-consent. A
+  CSRF nonce was added to the consent decision at the same time (not
+  present before), closing a gap the old code had.
 - **No token revocation UI** — `/oauth/revoke` exists and works, but nothing
   in this connector calls it; a user has no way to "disconnect" their
   Freshdesk account short of someone manually hitting that endpoint.

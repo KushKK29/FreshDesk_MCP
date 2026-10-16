@@ -9,6 +9,8 @@ dependencies = [
     "uvicorn",
     "pymongo",
     "python-multipart",
+    "bcrypt",
+    "cryptography",
 ]
 
 [tool.vercel]

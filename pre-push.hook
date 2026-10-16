@@ -1,0 +1,6 @@
+#!/bin/sh
+# Blocks `git push` if check.py fails — "nothing breaking gets pushed."
+# Local-only (not tracked in git); re-run `bash setup-hooks.sh` (or copy this
+# file) after a fresh clone.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+.venv/bin/python check.py

@@ -10,28 +10,37 @@ request log: ChatGPT hit POST /, /.well-known/oauth-protected-resource, and
 served, which is why tools showed up as empty even after OAuth succeeded.
 
 oauth_server.py's register/authorize/token endpoints are unchanged and still
-do the real work (PKCE, Freshdesk credential verification, Mongo-backed
-grants). This file wires the MCP SDK's TokenVerifier protocol to look up
-those same grants, and exposes list_tickets/get_ticket/search_tickets as
-real MCP tools via FastMCP.
+do the real work (PKCE, hub login, Mongo-backed grants). This file wires the
+MCP SDK's TokenVerifier protocol to look up those same grants, and exposes
+every registered provider adapter's tools dynamically — the tool list is no
+longer 3 hardcoded Freshdesk functions (connector-hub plan Task 6): it's
+built per-request from ADAPTERS, filtered to the calling hub user's active
+connections (PRD F3), so adding a provider needs no change here.
 """
 import os
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import Tool as MCPTool
 
 try:
-    # Flat import — works when run as `uvicorn mcp_http_server:app --app-dir src` (local dev).
-    import freshdesk_client as fd
+    import adapters
+    import connections
+    import confirm_tokens
     from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 except ImportError:
-    # Package-relative import — works when imported as `src.mcp_http_server:app` (Vercel).
-    from src import freshdesk_client as fd
+    from src import adapters
+    from src import connections
+    from src import confirm_tokens
     from src.oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
+
+adapters.register_all_adapters()
 
 
 class MongoGrantTokenVerifier(TokenVerifier):
@@ -65,12 +74,12 @@ def _grant_for_token(token: str) -> dict | None:
 
 
 mcp = FastMCP(
-    name="Freshdesk Connector",
-    instructions="Read-only connector for Freshdesk support tickets. List recent tickets, "
-    "fetch a single ticket's full details by id, or search tickets by status/priority/type "
-    "or by a free-text subject/description match. Cannot create, update, or delete tickets, "
-    "and cannot access anything outside the connected Freshdesk account's tickets.",
-    website_url="https://www.freshworks.com/freshdesk/",
+    name="Connector Hub",
+    instructions="Connector hub for CRM and ticketing tools. Tools are namespaced by provider "
+    "(e.g. freshdesk_list_tickets, asana_list_tasks) and only appear for providers you've connected "
+    "from the Connected accounts page. Destructive, send, or bulk actions return a preview and a "
+    "confirm_token first; call the same tool again with that confirm_token to execute.",
+    website_url=BASE_URL,
     token_verifier=MongoGrantTokenVerifier(),
     auth=AuthSettings(
         issuer_url=BASE_URL,
@@ -83,8 +92,6 @@ mcp = FastMCP(
         # DNS-rebinding protection defaults to an EMPTY allowed_hosts list, which rejects every
         # Host header including our own public one — "Invalid Host header", 421 Misdirected
         # Request, observed live against ChatGPT. Must explicitly allow the deployed hostname.
-        # Uses the already-rstrip'd BASE_URL (from oauth_server.py), not the raw env var — a
-        # trailing slash here would put a stray "/" on the end of the allowed hostname.
         allowed_hosts=[BASE_URL.split("://")[-1]],
         allowed_origins=[BASE_URL],
     ),
@@ -95,37 +102,110 @@ def _current_access_token() -> str:
     """Pulled from the MCP request context the SDK sets up per call, after
     TokenVerifier has already approved it — so a missing/expired token never
     reaches here, the SDK's auth middleware rejects it first."""
-    from mcp.server.fastmcp.server import Context
     ctx = mcp.get_context()
-    # FastMCP stores the verified AccessToken on the request state during the
-    # auth middleware; retrieve the raw bearer token from there.
     return ctx.request_context.request.headers.get("authorization", "").removeprefix("Bearer ")
 
 
-@mcp.tool()
-def list_tickets(status: str | None = None, updated_since: str | None = None, page: int = 1) -> list[dict]:
-    """List tickets for the connected Freshdesk account, newest first, paginated.
-    Optionally filter by status or by an updated_since timestamp (ISO 8601)."""
+def _active_adapter_tools_for_user(user_id: str) -> list[tuple[adapters.ToolSpec, str]]:
+    """(ToolSpec, provider_key) pairs for every tool the user's active,
+    enabled connections expose — PRD F3: tools/list reflects only active,
+    enabled connections, not every registered provider."""
+    out = []
+    for conn_row in connections.list_connections_for_user(user_id):
+        if conn_row["status"] != "active":
+            continue
+        provider = conn_row["provider"]
+        adapter = adapters.ADAPTERS.get(provider)
+        if not adapter:
+            continue
+        enabled = conn_row.get("enabled_tools")  # None = all enabled (PRD F7)
+        for spec in adapter.tools():
+            if enabled is not None and spec.name not in enabled:
+                continue
+            out.append((spec, provider))
+    return out
+
+
+def _tool_spec_to_mcp_tool(spec: adapters.ToolSpec) -> MCPTool:
+    input_schema = spec.input_schema
+    if spec.requires_confirm:
+        # Added here, not on every adapter's own ToolSpec — the confirm_token
+        # field is a cross-cutting dispatch-layer concern (confirm_tokens.py),
+        # not something each adapter module should know the shape of.
+        input_schema = dict(input_schema)
+        input_schema["properties"] = {
+            **input_schema.get("properties", {}),
+            "confirm_token": {"type": "string", "description": "From a prior preview call to this same tool — required to execute, not to preview."},
+        }
+    return MCPTool(
+        name=spec.name,
+        description=spec.description + " Destructive/send/bulk action: first call previews and returns a confirm_token; call again with that token to execute." if spec.requires_confirm else spec.description,
+        inputSchema=input_schema,
+        annotations={
+            "readOnlyHint": spec.read_only_hint,
+            "destructiveHint": spec.destructive_hint,
+            "idempotentHint": spec.idempotent_hint,
+            "openWorldHint": spec.open_world_hint,
+        },
+    )
+
+
+async def _list_tools_for_current_caller() -> list[MCPTool]:
+    """Replaces FastMCP's static list_tools(): the SDK's method takes no
+    request context, so tool visibility can't vary per caller through the
+    normal @mcp.tool() path. Monkey-patched onto the instance below — PRD F3
+    is a hard requirement (hide tools for providers the caller hasn't
+    connected), not optional, so this is intentional, not a workaround for
+    convenience."""
     token = _current_access_token()
     grant = _grant_for_token(token)
-    return fd.list_tickets_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], status, updated_since, page)
+    if not grant:
+        return []
+    return [_tool_spec_to_mcp_tool(spec) for spec, _provider in _active_adapter_tools_for_user(grant["user_id"])]
 
 
-@mcp.tool()
-def get_ticket(ticket_id: int, include: str | None = None) -> dict:
-    """Fetch the full details of a single Freshdesk ticket by its numeric id.
-    Optionally include related data such as conversations or the requester's info."""
+async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
     token = _current_access_token()
     grant = _grant_for_token(token)
-    return fd.get_ticket_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], ticket_id, include)
+    if not grant:
+        raise ToolError("not authenticated")
+
+    # confirm_token travels alongside the tool's real arguments but isn't
+    # one of them — stripped before it reaches the adapter, and excluded
+    # from the args hash the token is bound to (same args in, same hash,
+    # regardless of whether a confirm_token happens to be present).
+    call_args = {k: v for k, v in arguments.items() if k != "confirm_token"}
+    supplied_token = arguments.get("confirm_token")
+
+    for spec, provider in _active_adapter_tools_for_user(grant["user_id"]):
+        if spec.name != name:
+            continue
+
+        if spec.requires_confirm:
+            # Fail-closed gate: a destructive/send/bulk tool never executes
+            # on its first call, no matter what arguments arrive. Without a
+            # valid, matching confirm_token it returns a preview only.
+            if not supplied_token or not confirm_tokens.consume(supplied_token, grant["user_id"], provider, name, call_args):
+                new_token = confirm_tokens.issue(grant["user_id"], provider, name, call_args)
+                return {"preview": call_args, "confirm_token": new_token, "message": f"This action ({name}) requires confirmation. Call it again with this confirm_token to execute."}
+
+        conn_row = connections.get_connection(grant["user_id"], provider)
+        if not conn_row:
+            raise ToolError(f"{provider} is not connected or needs reauthorization")
+        conn = adapters.Connection(
+            user_id=grant["user_id"], provider=provider, auth_type=conn_row["auth_type"],
+            credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
+        )
+        adapter = adapters.ADAPTERS[provider]
+        result = adapter.call(name, call_args, conn)
+        connections.touch_last_used(grant["user_id"], provider)
+        return result
+
+    raise ToolError(f"unknown or disabled tool: {name}")
 
 
-@mcp.tool()
-def search_tickets(query: str) -> list[dict]:
-    """Search Freshdesk tickets matching a query string, e.g. 'status:2 AND priority:3'."""
-    token = _current_access_token()
-    grant = _grant_for_token(token)
-    return fd.search_tickets_for(grant["freshdesk_domain"], grant["freshdesk_api_key"], query)
+mcp.list_tools = _list_tools_for_current_caller  # bound-method override, see docstring above
+mcp.call_tool = _call_tool_for_current_caller  # same reasoning: call_tool's default dispatch only knows about @mcp.tool()-registered functions, none of which exist here
 
 
 # Mount the MCP streamable-HTTP app at / on top of the existing OAuth routes.
@@ -138,8 +218,6 @@ def search_tickets(query: str) -> list[dict]:
 # into it. Without this, every /  (JSON-RPC) request fails with
 # "RuntimeError: Task group is not initialized. Make sure to use run()."
 _mcp_asgi_app = mcp.streamable_http_app()
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager

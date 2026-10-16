@@ -90,6 +90,51 @@ def search_tickets_for(domain: str, api_key: str, query: str) -> list[dict]:
     return matches
 
 
+# --- Full object/action coverage (connector-hub plan, full-parity scope) ---
+# Generic CRUD over a Freshdesk resource path, used by the adapter for every
+# object below instead of one bespoke function per object — same _request()
+# primitive, just parametrized by path.
+
+def list_resource(domain: str, api_key: str, resource: str, page: int = 1) -> list[dict]:
+    return _request("GET", domain, api_key, f"/{resource}", params={"page": page}).json()
+
+
+def get_resource(domain: str, api_key: str, resource: str, resource_id: int) -> dict:
+    return _request("GET", domain, api_key, f"/{resource}/{resource_id}").json()
+
+
+def create_resource(domain: str, api_key: str, resource: str, data: dict) -> dict:
+    return _request("POST", domain, api_key, f"/{resource}", json=data).json()
+
+
+def update_resource(domain: str, api_key: str, resource: str, resource_id: int, data: dict) -> dict:
+    return _request("PUT", domain, api_key, f"/{resource}/{resource_id}", json=data).json()
+
+
+def delete_resource(domain: str, api_key: str, resource: str, resource_id: int) -> None:
+    _request("DELETE", domain, api_key, f"/{resource}/{resource_id}")
+
+
+def reply_ticket(domain: str, api_key: str, ticket_id: int, body: str) -> dict:
+    return _request("POST", domain, api_key, f"/tickets/{ticket_id}/reply", json={"body": body}).json()
+
+
+def add_note_ticket(domain: str, api_key: str, ticket_id: int, body: str, private: bool = True) -> dict:
+    return _request("POST", domain, api_key, f"/tickets/{ticket_id}/notes", json={"body": body, "private": private}).json()
+
+
+def merge_contacts(domain: str, api_key: str, primary_contact_id: int, secondary_contact_ids: list[int]) -> None:
+    _request("PUT", domain, api_key, f"/contacts/{primary_contact_id}/merge", json={"secondary_contact_ids": secondary_contact_ids})
+
+
+def bulk_update_tickets(domain: str, api_key: str, ticket_ids: list[int], properties: dict) -> dict:
+    return _request("PUT", domain, api_key, "/tickets/bulk_update", json={"bulk_action": {"ids": ticket_ids, "properties": properties}}).json()
+
+
+def forward_ticket(domain: str, api_key: str, ticket_id: int, to_emails: list[str], body: str) -> dict:
+    return _request("POST", domain, api_key, f"/tickets/{ticket_id}/forward", json={"to_emails": to_emails, "body": body}).json()
+
+
 # --- Single-tenant convenience wrappers, reading FRESHDESK_DOMAIN/API_KEY from the environment ---
 
 def list_tickets(status: str | None = None, updated_since: str | None = None, page: int = 1) -> list[dict]:
