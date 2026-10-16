@@ -28,7 +28,15 @@ def _request(method: str, host: str, access_token: str, path: str, **kwargs) -> 
 
 
 def list_records(host: str, access_token: str, module: str) -> list[dict]:
-    return _request("GET", host, access_token, f"/{module}").json().get("data", [])
+    # Zoho's list endpoint 400s (MANDATORY_NOT_FOUND) without a `fields`
+    # param. "id" is valid on every module, so it's always safe — but it
+    # means callers only get back {id: ...} per record, not full field data.
+    # ponytail: fine for verify() (only needs proof the token/module work),
+    # NOT fine for a real "list leads" tool call — add per-module field lists
+    # (or switch those tools to query_coql, which already takes an explicit
+    # SELECT) once we can test against a live Zoho org and see what each
+    # module's fields are actually called.
+    return _request("GET", host, access_token, f"/{module}", params={"fields": "id"}).json().get("data", [])
 
 
 def get_record(host: str, access_token: str, module: str, record_id: str) -> dict:

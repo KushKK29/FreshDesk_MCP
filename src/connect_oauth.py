@@ -9,6 +9,7 @@ TTL-indexed Mongo record created at /start, consumed exactly once at
 """
 import base64
 import hashlib
+import logging
 import os
 import secrets
 import time
@@ -17,6 +18,8 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+logger = logging.getLogger(__name__)
 
 try:
     import auth
@@ -187,7 +190,10 @@ def connect_callback(provider: str, request: Request, code: str | None = Query(N
 
     resp = httpx.post(config["token_url"], data=token_data, timeout=15)
     if resp.status_code >= 400:
-        return HTMLResponse(_error_page("Connection failed", f"{provider} rejected the token exchange."), status_code=502)
+        # Full upstream body (may echo request params) goes server-side only —
+        # never into the public error page.
+        logger.warning("token exchange failed for %s: status=%s body=%s", provider, resp.status_code, resp.text)
+        return HTMLResponse(_error_page("Connection failed", f"{provider} rejected the token exchange (status {resp.status_code})."), status_code=502)
     token_body = resp.json()
 
     credentials = {
