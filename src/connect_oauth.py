@@ -67,7 +67,7 @@ PROVIDER_OAUTH_CONFIG: dict[str, dict] = {
         "authorize_url": "https://login.salesforce.com/services/oauth2/authorize",
         "token_url": "https://login.salesforce.com/services/oauth2/token",
         "scopes": ["api", "refresh_token"],
-        "pkce": False,  # confidential client (server-side secret) is the control
+        "pkce": True,  # this Connected App has "Require PKCE" forced on (not optional in its Security settings) — Salesforce rejects /authorize with "missing required code challenge" otherwise
         "instance_url_from_token_response": True,  # Salesforce returns the org's own instance_url in the token body — captured into credentials below (PRD §7.5 SSRF guard: never from user input)
     },
     "zoho": {
