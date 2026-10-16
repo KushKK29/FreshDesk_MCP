@@ -2,14 +2,17 @@
 connected (with tool count, last used, disconnect), ready-to-connect (OAuth
 app registered, one-click connect), or not-yet-configured (OAuth app missing,
 explains exactly what env vars are needed) — plus Freshdesk's API-key form.
-Redesigned so the whole picture (what's live, what's possible, what's
-blocked and why) is visible at a glance, not just a list of what's already
-connected (PRD F10: "status, last used, and scopes").
+
+Redesigned (second pass) as a proper admin-panel layout: sidebar + summary
+row + provider list, real favicons via Google's favicon service, clicking a
+connected provider opens its tool detail page (provider_detail.py) showing
+every tool's name/description and exactly how to point ChatGPT, Claude, or
+any other MCP client at this server.
 
 Mounted the same way login_pages.router is — behind the hub-login gate,
-reusing oauth_server's _PAGE_STYLES/_error_page so it looks the same without
-duplicating CSS. Route paths and form field names are unchanged from the
-prior version — only the HTML this module renders is different.
+reusing oauth_server's _PAGE_STYLES so it looks the same without duplicating
+CSS. Route paths and form field names are unchanged from the prior version —
+existing tests and the connect/disconnect flow work exactly as before.
 """
 import html
 import os
@@ -39,11 +42,115 @@ router = APIRouter()
 _freshdesk_adapter = FreshdeskAdapter()
 register_all_adapters()  # idempotent — ensures ADAPTERS is populated even if this page loads before mcp_http_server.py does
 
-_PROVIDER_DISPLAY_NAMES = {
+PROVIDER_DISPLAY_NAMES = {
     "freshdesk": "Freshdesk", "asana": "Asana", "hubspot": "HubSpot", "salesforce": "Salesforce",
     "zoho": "Zoho CRM", "outreach": "Outreach", "salesloft": "SalesLoft",
 }
-_ALL_PROVIDER_KEYS = list(_PROVIDER_DISPLAY_NAMES.keys())
+PROVIDER_DOMAINS = {
+    "freshdesk": "freshdesk.com", "asana": "asana.com", "hubspot": "hubspot.com", "salesforce": "salesforce.com",
+    "zoho": "zoho.com", "outreach": "outreach.io", "salesloft": "salesloft.com",
+}
+_ALL_PROVIDER_KEYS = list(PROVIDER_DISPLAY_NAMES.keys())
+
+
+def favicon_url(provider: str) -> str:
+    domain = PROVIDER_DOMAINS.get(provider, f"{provider}.com")
+    return f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
+
+
+# Shared admin-panel chrome (sidebar + content shell) — used here and by
+# provider_detail.py so both pages read as one product, not two different apps.
+_EXTRA_STYLES = """
+    body { align-items: stretch; justify-content: stretch; padding: 0; background: var(--bg); }
+    .shell { width: 100%; min-height: 100vh; display: flex; }
+    .sidebar {
+      width: 232px; flex: none; box-sizing: border-box; padding: 20px 14px;
+      display: flex; flex-direction: column; background: var(--card); border-right: 1px solid var(--border);
+    }
+    .sidebar-logo { display: flex; align-items: center; gap: 9px; padding: 4px 8px 20px 8px; }
+    .sidebar-logo .logo-badge { width: 22px; height: 22px; border-radius: 6px; background: var(--text); }
+    .sidebar-logo .logo-text { font-weight: 600; font-size: 14px; color: var(--text); }
+    .nav-item { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 7px; margin-bottom: 1px; font-size: 13.5px; }
+    .nav-item.active { background: var(--border-soft); color: var(--text); font-weight: 600; }
+    .nav-item:not(.active) { color: var(--muted); font-weight: 500; }
+    .sidebar-user { padding: 10px; border-radius: 9px; border: 1px solid var(--border); display: flex; align-items: center; gap: 9px; margin-top: auto; }
+    .sidebar-avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--border-soft); flex: none; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--muted); }
+    .sidebar-email { font-size: 12px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .logout-btn { background: none; border: none; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 11px; padding: 0; font-family: inherit; }
+    .main { flex: 1 1 auto; overflow-y: auto; }
+    .main-inner { max-width: 920px; margin: 0 auto; padding: 36px 40px 48px 40px; }
+    .page-title { margin: 0 0 5px 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+    .page-sub { font-size: 13.5px; color: var(--muted); }
+    .stat-row { display: flex; gap: 32px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 28px; }
+    .stat-value { font-size: 20px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.1; }
+    .stat-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+    .provider-list { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 32px; background: var(--card); }
+    .provider-row { display: flex; align-items: center; gap: 14px; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); text-decoration: none; color: inherit; }
+    .provider-row:last-child { border-bottom: none; }
+    .provider-row.clickable:hover { background: var(--bg); cursor: pointer; }
+    .provider-favicon { width: 24px; height: 24px; border-radius: 6px; flex: none; }
+    .provider-name { font-weight: 600; font-size: 14px; color: var(--text); }
+    .provider-meta { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); display: inline-block; }
+    .status-text { font-size: 11.5px; color: var(--success); font-weight: 500; }
+    .connect-btn { padding: 7px 14px; border-radius: 7px; border: none; background: var(--accent); color: var(--accent-text); font-size: 12.5px; font-weight: 500; cursor: pointer; flex: none; font-family: inherit; }
+    .not-configured { font-size: 12px; color: var(--muted-soft); flex: none; }
+    code.envvar { color: var(--muted); background: var(--border-soft); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+"""
+
+
+def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connected") -> str:
+    nav_items = [
+        ("connected", "Connected accounts", "/connected-accounts"),
+    ]
+    nav_html = "".join(
+        f'<a href="{href}" class="nav-item {"active" if key == active_nav else ""}">{html.escape(label)}</a>'
+        for key, label, href in nav_items
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>{_PAGE_STYLES}{_EXTRA_STYLES}</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-badge"></div>
+        <div class="logo-text">Connector Hub</div>
+      </div>
+      {nav_html}
+      <div class="sidebar-user">
+        <div class="sidebar-avatar">{html.escape(hub_email[:1].upper())}</div>
+        <div style="flex:1 1 auto; min-width:0;">
+          <div class="sidebar-email">{html.escape(hub_email)}</div>
+          <form method="post" action="/logout"><button type="submit" class="logout-btn">Log out</button></form>
+        </div>
+      </div>
+    </div>
+    <div class="main">
+      <div class="main-inner">
+        {body}
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _status_row_dot_and_text(conn: dict) -> str:
+    status = conn["status"]
+    if status == "active":
+        return '<span class="status-dot"></span><span class="status-text">Connected</span>'
+    if status == "needs_reauth":
+        return '<span class="status-dot" style="background:var(--danger);"></span><span class="status-text" style="color:var(--danger);">Needs reauthorization</span>'
+    return f'<span class="status-text" style="color:var(--muted);">{html.escape(status)}</span>'
 
 
 def _fmt_time(ts: float | None) -> str:
@@ -62,72 +169,54 @@ def _oauth_app_configured(provider: str) -> bool:
     return bool(config and os.environ.get(config["client_id_env"]))
 
 
-def _status_badge(label: str, color: str) -> str:
-    return f'<span style="display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; background:{color}1f; color:{color};">{label}</span>'
-
-
-def _connected_card(conn: dict, csrf: str) -> str:
+def _connected_row(conn: dict, csrf: str) -> str:
     provider = conn["provider"]
-    name = html.escape(_PROVIDER_DISPLAY_NAMES.get(provider, provider))
-    status = conn["status"]
-    badge = {
-        "active": _status_badge("Connected", "#4ade80"),
-        "needs_reauth": _status_badge("Needs reauthorization", "#fbbf24"),
-    }.get(status, _status_badge(status, "#9aa4b2"))
+    name = html.escape(PROVIDER_DISPLAY_NAMES.get(provider, provider))
     tool_count = _tool_count(provider)
     return f"""
-    <div style="display:flex; align-items:center; justify-content:space-between; padding:16px; border:1px solid var(--border); border-radius:10px; margin-bottom:10px; background:rgba(74,222,128,0.04);">
-      <div>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span style="font-weight:600; font-size:15px;">{name}</span>
-          {badge}
+    <a href="/connected-accounts/{html.escape(provider)}" class="provider-row clickable">
+      <img src="{favicon_url(provider)}" class="provider-favicon" alt="">
+      <div style="flex:1 1 auto; min-width:0;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="provider-name">{name}</span>
+          {_status_row_dot_and_text(conn)}
         </div>
-        <div style="font-size:12px; color:var(--muted); margin-top:6px;">
-          {tool_count} tools available · last used {html.escape(_fmt_time(conn.get("last_used_at")))} · scopes: {html.escape(", ".join(conn.get("scopes") or []) or "n/a")}
-        </div>
+        <div class="provider-meta">{tool_count} tools · last used {html.escape(_fmt_time(conn.get("last_used_at")))}</div>
       </div>
-      <form method="post" action="/connected-accounts/disconnect">
-        <input type="hidden" name="provider" value="{html.escape(provider)}">
-        <input type="hidden" name="csrf" value="{csrf}">
-        <button type="submit" style="background:transparent; border:1px solid var(--border); color:var(--muted); padding:8px 16px; border-radius:8px; cursor:pointer; font-size:13px;">Disconnect</button>
-      </form>
+      <div style="font-size:13px; color:var(--muted-soft); flex:none; display:flex; align-items:center; gap:18px;">
+        <div>View tools →</div>
+      </div>
+    </a>
+    """
+
+
+def _available_row(provider: str) -> str:
+    name = html.escape(PROVIDER_DISPLAY_NAMES[provider])
+    tool_count = _tool_count(provider)
+    return f"""
+    <div class="provider-row">
+      <img src="{favicon_url(provider)}" class="provider-favicon" alt="">
+      <div style="flex:1 1 auto; min-width:0;">
+        <div class="provider-name">{name}</div>
+        <div class="provider-meta">{tool_count} tools · OAuth app configured</div>
+      </div>
+      <a href="/connect/{provider}/start"><button type="button" class="connect-btn">Connect</button></a>
     </div>
     """
 
 
-def _available_card(provider: str) -> str:
-    """OAuth provider with no connection yet, but its app IS configured
-    (client_id env var set) — one click away."""
-    name = html.escape(_PROVIDER_DISPLAY_NAMES[provider])
-    tool_count = _tool_count(provider)
-    return f"""
-    <div style="display:flex; align-items:center; justify-content:space-between; padding:16px; border:1px solid var(--border); border-radius:10px; margin-bottom:10px;">
-      <div>
-        <div style="font-weight:600; font-size:15px;">{name}</div>
-        <div style="font-size:12px; color:var(--muted); margin-top:6px;">{tool_count} tools available once connected</div>
-      </div>
-      <a href="/connect/{provider}/start" style="text-decoration:none;">
-        <button type="button" style="background: var(--accent); color: white; border:none; padding:8px 18px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;">Connect</button>
-      </a>
-    </div>
-    """
-
-
-def _not_configured_card(provider: str) -> str:
-    """OAuth provider whose app hasn't been registered yet — tells the
-    operator exactly which env vars are missing instead of a dead button."""
-    name = html.escape(_PROVIDER_DISPLAY_NAMES[provider])
+def _not_configured_row(provider: str) -> str:
+    name = html.escape(PROVIDER_DISPLAY_NAMES[provider])
     tool_count = _tool_count(provider)
     config = PROVIDER_OAUTH_CONFIG[provider]
     return f"""
-    <div style="display:flex; align-items:center; justify-content:space-between; padding:16px; border:1px dashed var(--border); border-radius:10px; margin-bottom:10px; opacity:0.6;">
-      <div>
-        <div style="font-weight:600; font-size:15px;">{name}</div>
-        <div style="font-size:12px; color:var(--muted); margin-top:6px;">
-          {tool_count} tools — not yet set up. Needs <code style="color:#9aa4b2;">{html.escape(config['client_id_env'])}</code> and <code style="color:#9aa4b2;">{html.escape(config['client_secret_env'])}</code> env vars.
-        </div>
+    <div class="provider-row">
+      <img src="{favicon_url(provider)}" class="provider-favicon" alt="" style="opacity:0.45;">
+      <div style="flex:1 1 auto; min-width:0;">
+        <div class="provider-name" style="color:var(--muted);">{name}</div>
+        <div class="provider-meta">{tool_count} tools · needs <code class="envvar">{html.escape(config['client_id_env'])}</code> and <code class="envvar">{html.escape(config['client_secret_env'])}</code></div>
       </div>
-      <button type="button" disabled style="background:transparent; border:1px solid var(--border); color:#5a6472; padding:8px 18px; border-radius:8px; font-size:13px; cursor:not-allowed;">Not configured</button>
+      <div class="not-configured">Not configured</div>
     </div>
     """
 
@@ -138,26 +227,25 @@ def _page(hub_email: str, connections_rows: list[dict], csrf: str, error: str | 
     total_providers = len(_ALL_PROVIDER_KEYS)
     total_tools_live = sum(_tool_count(p) for p in connected_by_provider)
 
-    error_html = f'<div class="scope-box" style="border-color: rgba(239,68,68,0.3); color: #f3b4b4;">{html.escape(error)}</div>' if error else ""
+    error_html = f'<div class="scope-box" style="border-color:var(--danger-border); color:var(--danger); margin-bottom:20px;">{html.escape(error)}</div>' if error else ""
 
-    connected_html = "".join(_connected_card(connected_by_provider[p], csrf) for p in _ALL_PROVIDER_KEYS if p in connected_by_provider)
+    connected_html = "".join(_connected_row(connected_by_provider[p], csrf) for p in _ALL_PROVIDER_KEYS if p in connected_by_provider)
     if not connected_html:
-        connected_html = '<p class="subtitle" style="margin:0 0 20px;">Nothing connected yet — connect a provider below to get started.</p>'
+        connected_html = '<div style="padding:24px 18px; text-align:center; color:var(--muted); font-size:13px;">Nothing connected yet — connect a provider below to get started.</div>'
 
-    other_cards = []
+    other_rows = []
     for provider in _ALL_PROVIDER_KEYS:
         if provider == "freshdesk" or provider in connected_by_provider:
             continue
-        other_cards.append(_available_card(provider) if _oauth_app_configured(provider) else _not_configured_card(provider))
-    other_html = "".join(other_cards)
+        other_rows.append(_available_row(provider) if _oauth_app_configured(provider) else _not_configured_row(provider))
 
     freshdesk_section = ""
     if "freshdesk" not in connected_by_provider:
         freshdesk_tool_count = _tool_count("freshdesk")
         freshdesk_section = f"""
-        <div style="padding:16px; border:1px solid var(--border); border-radius:10px; margin-bottom:10px;">
-          <div style="font-weight:600; font-size:15px; margin-bottom:4px;">Freshdesk</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">{freshdesk_tool_count} tools — no OAuth app for Freshdesk yet, connect with your domain and API key instead.</div>
+        <div class="provider-row" style="display:block;">
+          <div class="provider-name" style="margin-bottom:2px;">Freshdesk</div>
+          <div class="provider-meta" style="margin-bottom:14px;">{freshdesk_tool_count} tools · no OAuth app yet — connect with your domain and API key instead</div>
           <form method="post" action="/connected-accounts/connect-freshdesk">
             <input type="hidden" name="csrf" value="{csrf}">
             <label for="freshdesk_domain">Freshdesk domain</label>
@@ -165,41 +253,30 @@ def _page(hub_email: str, connections_rows: list[dict], csrf: str, error: str | 
             <label for="freshdesk_api_key">Freshdesk API key</label>
             <input id="freshdesk_api_key" name="freshdesk_api_key" type="password" placeholder="Found under Profile Settings → API Key" required autocomplete="off">
             <div class="actions">
-              <button type="submit" style="background: var(--accent); color: white;">Connect Freshdesk</button>
+              <button type="submit" style="flex:none; background: var(--accent); color: var(--accent-text);">Connect Freshdesk</button>
             </div>
           </form>
         </div>
         """
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connected accounts</title>
-  <style>{_PAGE_STYLES}</style>
-</head>
-<body>
-  <div class="card" style="max-width:640px;">
-    <div class="logo-row">
-      <div class="logo-badge">FD</div>
-      <div class="logo-text">Connector Hub</div>
-    </div>
-    <h1>Connected accounts</h1>
-    <p class="subtitle">Signed in as {html.escape(hub_email)}. {connected_count} of {total_providers} providers connected, {total_tools_live} tools live right now.
-      <form method="post" action="/logout" style="display:inline;"><button type="submit" style="background:none; border:none; color:var(--muted); text-decoration:underline; cursor:pointer; font-size:inherit; padding:0;">Log out</button></form>
-    </p>
-    {error_html}
+    body = f"""
+      <div style="margin-bottom:28px;">
+        <h1 class="page-title">Connected accounts</h1>
+        <div class="page-sub">Tools Claude, ChatGPT, and other agents can use through this hub.</div>
+      </div>
+      {error_html}
+      <div class="stat-row">
+        <div><div class="stat-value">{connected_count} of {total_providers}</div><div class="stat-label">providers connected</div></div>
+        <div><div class="stat-value">{total_tools_live}</div><div class="stat-label">tools available</div></div>
+      </div>
 
-    <h1 style="font-size:14px; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted); margin-top:24px; margin-bottom:12px;">Connected</h1>
-    {connected_html}
+      <div class="section-title">Connected</div>
+      <div class="provider-list">{connected_html}</div>
 
-    <h1 style="font-size:14px; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted); margin-top:28px; margin-bottom:12px;">Available to connect</h1>
-    {freshdesk_section}
-    {other_html}
-  </div>
-</body>
-</html>"""
+      <div class="section-title">Available to connect</div>
+      <div class="provider-list">{freshdesk_section}{"".join(other_rows)}</div>
+    """
+    return _page_shell("Connected accounts", hub_email, body)
 
 
 @router.get("/connected-accounts")

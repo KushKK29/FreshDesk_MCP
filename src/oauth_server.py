@@ -139,18 +139,48 @@ async def register(request: Request):
 
 # ── Authorize + consent ─────────────────────────────────────────────────
 
+# Shared design system (PRD-redesign): flat, bordered, no gradients — Inter
+# font, light by default, dark via prefers-color-scheme. Same class names
+# as before (card/logo-row/logo-badge/logo-text/subtitle/scope-box/
+# error-icon/actions) so every page that already composes them (consent,
+# error, login, signup) keeps working unchanged.
 _PAGE_STYLES = """
     :root {
-      color-scheme: dark;
-      --bg: #0b0e14;
-      --card: #141821;
-      --border: #242b3a;
-      --text: #e8eaed;
-      --muted: #9aa4b2;
-      --accent: #2563eb;
-      --accent-hover: #1d4ed8;
-      --danger: #ef4444;
-      --danger-border: #3a1f24;
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --card: #ffffff;
+      --border: #e4e4e7;
+      --border-soft: #f0f0f1;
+      --text: #18181b;
+      --muted: #71717a;
+      --muted-soft: #a1a1aa;
+      --accent: #18181b;
+      --accent-hover: #27272a;
+      --accent-text: #ffffff;
+      --danger: #b45309;
+      --danger-bg: #fef3c7;
+      --danger-border: #fde68a;
+      --success: #16a34a;
+      --success-bg: #dcfce7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0a0a0b;
+        --card: #111113;
+        --border: #27272a;
+        --border-soft: #1c1c1f;
+        --text: #f4f4f5;
+        --muted: #a1a1aa;
+        --muted-soft: #71717a;
+        --accent: #f4f4f5;
+        --accent-hover: #ffffff;
+        --accent-text: #18181b;
+        --danger: #fbbf24;
+        --danger-bg: #422006;
+        --danger-border: #713f12;
+        --success: #4ade80;
+        --success-bg: #052e16;
+      }
     }
     * { box-sizing: border-box; }
     body {
@@ -159,59 +189,54 @@ _PAGE_STYLES = """
       display: flex;
       align-items: center;
       justify-content: center;
-      background: radial-gradient(circle at top, #151a24, var(--bg));
+      background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
       padding: 24px;
     }
     .card {
       width: 100%;
-      max-width: 440px;
+      max-width: 400px;
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 36px 32px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+      border-radius: 12px;
+      padding: 32px 28px;
     }
     .logo-row {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 9px;
       margin-bottom: 24px;
     }
     .logo-badge {
-      width: 40px;
-      height: 40px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #2563eb, #7c3aed);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 700;
-      font-size: 16px;
-      color: white;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      background: var(--text);
       flex-shrink: 0;
     }
-    .logo-text { font-size: 14px; color: var(--muted); }
+    .logo-text { font-size: 14px; font-weight: 600; color: var(--text); }
     h1 {
-      font-size: 20px;
-      font-weight: 600;
-      margin: 0 0 8px;
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin: 0 0 6px;
       line-height: 1.4;
     }
     .subtitle {
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
       line-height: 1.6;
       margin: 0 0 24px;
     }
     .scope-box {
-      background: rgba(37, 99, 235, 0.08);
-      border: 1px solid rgba(37, 99, 235, 0.25);
+      background: var(--bg);
+      border: 1px solid var(--border);
       border-radius: 10px;
       padding: 14px 16px;
       margin-bottom: 24px;
-      font-size: 13px;
+      font-size: 12.5px;
       color: var(--muted);
     }
     .scope-box strong { color: var(--text); }
@@ -219,73 +244,76 @@ _PAGE_STYLES = """
     .scope-box li { margin: 4px 0; }
     label {
       display: block;
-      font-size: 13px;
+      font-size: 12.5px;
       font-weight: 500;
       color: var(--text);
       margin-bottom: 6px;
-      margin-top: 18px;
+      margin-top: 14px;
     }
     label:first-of-type { margin-top: 0; }
     input {
       width: 100%;
-      padding: 11px 14px;
-      background: #0d1117;
+      padding: 9px 11px;
+      background: var(--card);
       border: 1px solid var(--border);
       border-radius: 8px;
       color: var(--text);
-      font-size: 14px;
+      font-size: 13.5px;
+      font-family: inherit;
       transition: border-color 0.15s;
     }
     input:focus {
       outline: none;
-      border-color: var(--accent);
+      border-color: var(--text);
     }
-    input::placeholder { color: #5a6472; }
-    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    input::placeholder { color: var(--muted-soft); }
+    .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
     .actions {
       display: flex;
       gap: 10px;
-      margin-top: 28px;
+      margin-top: 22px;
     }
     button {
       flex: 1;
-      padding: 12px 20px;
+      padding: 10px 18px;
       border-radius: 8px;
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 600;
+      font-family: inherit;
       cursor: pointer;
       border: 1px solid transparent;
       transition: background 0.15s, border-color 0.15s;
     }
-    button[value="approve"] {
+    button[value="approve"], button[type="submit"]:not([value]) {
       background: var(--accent);
-      color: white;
+      color: var(--accent-text);
     }
-    button[value="approve"]:hover { background: var(--accent-hover); }
+    button[value="approve"]:hover, button[type="submit"]:not([value]):hover { background: var(--accent-hover); }
     button[value="deny"] {
       background: transparent;
       border-color: var(--border);
       color: var(--muted);
     }
-    button[value="deny"]:hover { border-color: #3a4454; color: var(--text); }
+    button[value="deny"]:hover { border-color: var(--muted-soft); color: var(--text); }
     .footer-note {
-      margin-top: 20px;
-      font-size: 12px;
-      color: #5a6472;
+      margin-top: 18px;
+      font-size: 11.5px;
+      color: var(--muted-soft);
       text-align: center;
       line-height: 1.5;
     }
     .error-icon {
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      background: rgba(239, 68, 68, 0.12);
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--danger-bg);
       border: 1px solid var(--danger-border);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 20px;
-      margin-bottom: 20px;
+      font-size: 18px;
+      color: var(--danger);
+      margin-bottom: 18px;
     }
 """
 
@@ -632,14 +660,17 @@ try:
     import login_pages
     import connected_accounts
     import connect_oauth
+    import provider_detail
     from adapters import register_all_adapters
 except ImportError:
     from src import login_pages
     from src import connected_accounts
     from src import connect_oauth
+    from src import provider_detail
     from src.adapters import register_all_adapters
 
 register_all_adapters()  # every adapter module registers itself into ADAPTERS — needed by connect_oauth.py's verify() call and mcp_http_server.py's tool dispatch, whichever entrypoint runs first
 app.include_router(login_pages.router)
 app.include_router(connected_accounts.router)
+app.include_router(provider_detail.router)
 app.include_router(connect_oauth.router)

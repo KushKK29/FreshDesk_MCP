@@ -1,25 +1,26 @@
 # Freshdesk Connector
 
-A connector giving an AI agent read access (list/get/search) to Freshdesk
-tickets, with two separate ways to authenticate depending on who's using it.
-See [PLAN.md](PLAN.md) for full architecture and design rationale,
-[CAPABILITIES.md](CAPABILITIES.md) for what the agent can and cannot do.
+An MCP connector giving an AI agent access to Freshdesk tickets (list, get,
+search, reply, add note), with two separate ways to authenticate depending
+on who's using it. See [PLAN.md](PLAN.md) for full architecture and design
+rationale, [CAPABILITIES.md](CAPABILITIES.md) for what the agent can and
+cannot do.
 
 ## Two modes
 
 | | Single-tenant (API key) | Multi-tenant (OAuth 2.1 + real MCP) |
 |---|---|---|
-| Who it's for | One operator, one Freshdesk account | Anyone — each user connects their own Freshdesk account via Claude, ChatGPT, or Claude Code |
-| Setup | Paste a key into `.env` | Click "Connect" in Claude/ChatGPT, log in with your Freshdesk credentials |
-| Files | `src/mcp_server.py` | `src/mcp_http_server.py` (mounts on top of `src/oauth_server.py`) |
+| Who it's for | One operator, one Freshdesk account | Anyone — each user connects their own account(s) via Claude, ChatGPT, or Claude Code |
+| Setup | Paste a key into `.env` | Sign up for a hub account, then click "Connect" per provider |
+| Entrypoint | `src/mcp_server.py` | `src/mcp_http_server.py` (mounts on top of `src/oauth_server.py`) |
 | Needs | Nothing beyond Python | MongoDB + a public HTTPS URL |
 
 Both share the same Freshdesk HTTP client (`src/freshdesk_client.py`).
 
 **Live deployment (Mode 2):** [`https://fresh-desk-mcp.vercel.app`](https://fresh-desk-mcp.vercel.app)
 — this is the URL to use in the "Connect from ChatGPT / Claude / Claude Code"
-sections below. No setup needed to try it; just connect and authorize with
-your own Freshdesk domain and API key.
+sections below. No setup needed to try it; just sign up for a hub account and
+connect your own Freshdesk domain and API key.
 
 ---
 
@@ -45,9 +46,14 @@ Point Agent Studio's MCP client config at this process (stdio transport).
 
 This connector acts as its own OAuth 2.1 authorization server **and** a
 real MCP server (JSON-RPC over HTTP, the `streamable-http` transport) —
-Claude, ChatGPT, or Claude Code "Connect" directly to it, and each user
-authorizes their own Freshdesk account via a consent screen, without ever
-touching an API key file. Full flow diagram and design rationale in
+Claude, ChatGPT, or Claude Code "Connect" directly to it. Each user first
+signs up for a hub account (email + password, `src/auth.py`), then connects
+one or more upstream providers from the "Connected accounts" page
+(`src/connected_accounts.py`) — Freshdesk via API key, or Asana / HubSpot /
+Salesforce / Zoho CRM / Outreach / SalesLoft via that provider's own OAuth
+app (`src/connect_oauth.py`). Each connected provider's tools (e.g.
+`freshdesk_list_tickets`) become available to the MCP client, defined per
+provider in `src/adapters/`. Full flow diagram and design rationale in
 [PLAN.md's OAuth 2.1 architecture section](PLAN.md#oauth-21-architecture).
 
 > **Why two files (`oauth_server.py` + `mcp_http_server.py`), not one?**
@@ -65,9 +71,14 @@ touching an API key file. Full flow diagram and design rationale in
 
 Requires MongoDB (local for dev, Atlas free tier for a real deployment):
 ```bash
-cp .env.example .env   # fill in MONGO_URI and OAUTH_BASE_URL
+cp .env.example .env   # fill in MONGO_URI, OAUTH_BASE_URL, VAULT_MASTER_KEY
 uvicorn mcp_http_server:app --app-dir src --port 8004
 ```
+`VAULT_MASTER_KEY` encrypts stored provider credentials at rest
+(`src/vault.py`) — generate one with the command in `.env.example`.
+Upstream provider OAuth apps (Asana, HubSpot, etc.) are optional: a
+provider's "Connect" button only appears on the connected-accounts page
+once its `*_CLIENT_ID`/`*_CLIENT_SECRET` pair is set.
 
 Try the full OAuth flow yourself (one script, no manual curl needed):
 ```bash
@@ -84,16 +95,16 @@ be replayed and that refresh tokens rotate correctly.
 Already deployed at `https://fresh-desk-mcp.vercel.app` — to deploy your own copy:
 
 1. Deploy this repo to Vercel (the included `pyproject.toml` has the
-   `[tool.vercel] entrypoint = "src.mcp_http_server:app"` setting it needs).
+   `[tool.vercel] entrypoint = "src.mcp_http_server:app"` setting it needs;
+   `vercel.json` routes every path to that same entrypoint).
 2. Set `OAUTH_BASE_URL` to that deployed URL (e.g. `https://your-app.vercel.app`).
    This value feeds both the OAuth discovery metadata and the MCP transport's
    allowed-hosts check — get it wrong and every tool call 421s.
 3. Point `MONGO_URI` at an Atlas free-tier cluster instead of localhost.
-4. For local testing before a real deploy, `ngrok http 8004` gives a public
+4. Set `VAULT_MASTER_KEY` and any upstream provider OAuth app credentials
+   you want enabled.
+5. For local testing before a real deploy, `ngrok http 8004` gives a public
    HTTPS URL — set `OAUTH_BASE_URL` to that ngrok URL.
-
-(Render also works with the same `src/mcp_http_server.py` entrypoint — see
-the voice-agent project in this submission for that deployment pattern.)
 
 ### Connect from ChatGPT
 
@@ -102,12 +113,12 @@ the voice-agent project in this submission for that deployment pattern.)
 2. Enter `https://fresh-desk-mcp.vercel.app` (or your own deployed URL).
 3. ChatGPT auto-discovers the OAuth + MCP endpoints from
    `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`.
-4. Click through the OAuth consent screen — enter your real Freshdesk domain
-   and API key when prompted (this is this connector's login step, not a
-   Freshdesk-hosted page — see PLAN.md for why).
+4. Click through to the hub login page — sign up (email + password) or log
+   in, then connect Freshdesk (and/or any other configured provider) from
+   the connected-accounts page, and approve the consent screen.
 5. In a new chat, ask something like *"List my recent Freshdesk tickets"* or
    *"Search my Freshdesk tickets for authentication failure"* — ChatGPT
-   calls `list_tickets` / `search_tickets` behind the scenes.
+   calls `freshdesk_list_tickets` / `freshdesk_search_tickets` behind the scenes.
 
 If tools don't show up after connecting, disconnect and reconnect the app —
 ChatGPT can cache a stale manifest from an earlier connection attempt.
@@ -116,8 +127,8 @@ ChatGPT can cache a stale manifest from an earlier connection attempt.
 
 1. Claude → **Settings → Connectors** → **Add custom connector**.
 2. Enter `https://fresh-desk-mcp.vercel.app` as the MCP server endpoint.
-3. Same OAuth consent flow as above — Freshdesk domain + API key, approve.
-4. Ask Claude to list or search your Freshdesk tickets in any chat.
+3. Same hub signup/login + connect-a-provider flow as above, then approve.
+4. Ask Claude to list, search, or reply to your Freshdesk tickets in any chat.
 
 ### Connect from Claude Code
 
@@ -125,31 +136,49 @@ Claude Code speaks MCP natively over stdio or HTTP. To add this connector:
 ```bash
 claude mcp add --transport http freshdesk https://fresh-desk-mcp.vercel.app
 ```
-Claude Code will walk you through the same OAuth consent flow in your
-browser the first time a tool from this connector is used. After that,
-`list_tickets`, `get_ticket`, and `search_tickets` are available as tools
-in any Claude Code session.
+Claude Code will walk you through the same hub login + consent flow in your
+browser the first time a tool from this connector is used. After that, the
+tools for every provider you've connected are available in any Claude Code
+session.
 
 ---
 
 ## Tests
 
 ```bash
+python check.py     # runs every tests/test_*.py and fails loud on the first problem
+```
+`check.py` treats a skipped test (no local MongoDB reachable) as a failure,
+not a pass — it's enforced by the pre-push hook (`setup-hooks.sh` installs
+it once per clone, then `git push` runs it automatically).
+
+Individually:
+```bash
 python tests/test_freshdesk_client.py   # HTTP client: retry, pagination, auth, rate limits, search-query handling
 python tests/test_oauth_server.py       # PKCE math, discovery, registration, auth rejections
+python tests/test_auth.py               # hub signup/login: bcrypt hashing, session cookies
+python tests/test_connected_accounts.py # connected-accounts page rendering and connect/disconnect routes
+python tests/test_connect_oauth.py      # upstream provider OAuth client flow
+python tests/test_mcp_http_server.py    # MCP tool listing/calling over the HTTP transport
+python tests/test_mcp_protocol_e2e.py   # end-to-end JSON-RPC protocol conformance
+python tests/test_adapters_*.py         # per-provider adapter tool specs and calls
 tests/test_oauth_flow.sh                # live end-to-end OAuth flow (needs a running server + real Freshdesk creds)
 ```
 
-## Tools exposed
+## Tools exposed (Freshdesk)
 
-- `list_tickets(status, updated_since, page)`
-- `get_ticket(ticket_id, include)`
-- `search_tickets(query)` — structured Freshdesk syntax (`status:2`) goes straight
-  to Freshdesk's search API; anything else (plain text like `"authentication failure"`)
-  is matched client-side against ticket subject/description, since Freshdesk's
-  search has no free-text field — see PLAN.md for why.
+- `freshdesk_list_tickets(status, updated_since, page)`
+- `freshdesk_get_ticket(ticket_id, include)`
+- `freshdesk_search_tickets(query)` — structured Freshdesk syntax (`status:2`) goes
+  straight to Freshdesk's search API; anything else (plain text like
+  `"authentication failure"`) is matched client-side against ticket
+  subject/description, since Freshdesk's search has no free-text field —
+  see PLAN.md for why.
+- `freshdesk_reply_ticket(ticket_id, body)`
+- `freshdesk_add_note_ticket(ticket_id, body, ...)`
 
-Same three primitives in both modes — Mode 1 exposes them as MCP tools over
-stdio (`src/mcp_server.py`), Mode 2 exposes them as real MCP tools over HTTP
-(`src/mcp_http_server.py`), reachable by any MCP-speaking client after
-completing the OAuth handshake.
+Mode 1 exposes these as MCP tools over stdio (`src/mcp_server.py`). Mode 2
+exposes them as real MCP tools over HTTP (`src/mcp_http_server.py`),
+reachable by any MCP-speaking client after completing the hub login + OAuth
+handshake — alongside whatever other providers (`src/adapters/`) that hub
+user has connected.

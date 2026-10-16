@@ -86,20 +86,22 @@ def _auth_form_page(form: str, error: str | None, next_param: str, csrf: str) ->
     # three before they land in the page.
     safe_next = html.escape(_safe_next(next_param))
     safe_switch_href = html.escape(switch_href)
-    error_html = f'<div class="scope-box" style="border-color: rgba(239,68,68,0.3); color: #f3b4b4;">{html.escape(error)}</div>' if error else ""
+    error_html = f'<div class="scope-box" style="border-color: var(--danger-border); color: var(--danger);">{html.escape(error)}</div>' if error else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>{_PAGE_STYLES}</style>
 </head>
 <body>
   <div class="card">
     <div class="logo-row">
-      <div class="logo-badge">FD</div>
-      <div class="logo-text">Freshdesk Connector</div>
+      <div class="logo-badge"></div>
+      <div class="logo-text">Connector Hub</div>
     </div>
     <h1>{html.escape(title)}</h1>
     {error_html}
@@ -111,7 +113,7 @@ def _auth_form_page(form: str, error: str | None, next_param: str, csrf: str) ->
       <label for="password">Password</label>
       <input id="password" name="password" type="password" placeholder="At least 8 characters" required autocomplete="current-password">
       <div class="actions">
-        <button type="submit" value="submit" style="background: var(--accent); color: white; border-color: transparent;">{html.escape(submit_label)}</button>
+        <button type="submit" value="submit" style="background: var(--accent); color: var(--accent-text); border-color: transparent;">{html.escape(submit_label)}</button>
       </div>
     </form>
     <p class="footer-note"><a href="{safe_switch_href}" style="color: var(--muted);">{html.escape(switch_label)}</a></p>
