@@ -62,11 +62,18 @@ def favicon_url(provider: str) -> str:
 # provider_detail.py so both pages read as one product, not two different apps.
 _EXTRA_STYLES = """
     body { align-items: stretch; justify-content: stretch; padding: 0; background: var(--bg); }
-    .shell { width: 100%; min-height: 100vh; display: flex; }
+    .shell { width: 100%; height: 100vh; display: flex; }
     .sidebar {
       width: 232px; flex: none; box-sizing: border-box; padding: 20px 14px;
       display: flex; flex-direction: column; background: var(--card); border-right: 1px solid var(--border);
+      height: 100%; overflow-y: auto;
     }
+    .theme-toggle-btn {
+      background: none; border: 1px solid var(--border); cursor: pointer; width: 100%;
+      text-align: left; font-family: inherit; color: var(--muted); font-size: 12px;
+      font-weight: 500; padding: 7px 10px; border-radius: 7px; margin-top: 10px;
+    }
+    .theme-toggle-btn:hover { background: var(--border-soft); color: var(--text); }
     .sidebar-logo { display: flex; align-items: center; gap: 9px; padding: 4px 8px 20px 8px; }
     .sidebar-logo .logo-badge { width: 22px; height: 22px; border-radius: 6px; background: var(--text); }
     .sidebar-logo .logo-text { font-weight: 600; font-size: 14px; color: var(--text); }
@@ -78,7 +85,7 @@ _EXTRA_STYLES = """
     .sidebar-email { font-size: 12px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .logout-btn { background: var(--border-soft); border: 1px solid var(--border); color: var(--text); text-decoration: none; cursor: pointer; font-size: 11px; font-weight: 500; padding: 4px 10px; border-radius: 6px; font-family: inherit; margin-top: 4px; }
     .logout-btn:hover { background: var(--border); }
-    .main { flex: 1 1 auto; overflow-y: auto; }
+    .main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
     .main-inner { max-width: 920px; margin: 0 auto; padding: 36px 40px 48px 40px; }
     .page-title { margin: 0 0 5px 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
     .page-sub { font-size: 13.5px; color: var(--muted); }
@@ -133,12 +140,6 @@ def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connec
         <div class="logo-text">Connector Hub</div>
       </div>
       {nav_html}
-      <button type="button" class="nav-item" style="background:none; border:1px solid var(--border); cursor:pointer; width:100%; text-align:left; font-family:inherit;" onclick="(function(){{
-        var cur = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-        var next = cur === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', next);
-        try {{ localStorage.setItem('hub_theme', next); }} catch (e) {{}}
-      }})()">Toggle theme</button>
       <div class="sidebar-user">
         <div class="sidebar-avatar">{html.escape(hub_email[:1].upper())}</div>
         <div style="flex:1 1 auto; min-width:0;">
@@ -146,6 +147,12 @@ def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connec
           <form method="post" action="/logout"><button type="submit" class="logout-btn">Log out</button></form>
         </div>
       </div>
+      <button type="button" class="theme-toggle-btn" onclick="(function(){{
+        var cur = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        var next = cur === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try {{ localStorage.setItem('hub_theme', next); }} catch (e) {{}}
+      }})()">Toggle theme</button>
     </div>
     <div class="main">
       <div class="main-inner">
