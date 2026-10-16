@@ -86,14 +86,31 @@ def test_unknown_provider_redirects_home():
     assert resp.headers["location"] == "/connected-accounts"
 
 
-def test_shows_real_tool_names_and_descriptions():
-    """The page must reflect the adapter's actual ToolSpec list, not
-    hand-maintained copy — proves it by checking real tool names/
-    descriptions from the Freshdesk adapter appear verbatim."""
+def test_tool_detail_hidden_before_connecting():
+    """A logged-in user who hasn't connected a provider must not see its
+    tool names/descriptions — otherwise the full tool surface of every
+    provider is browsable by URL regardless of connection status."""
     if not MONGO_AVAILABLE:
         return
     _reset_db()
     c, _ = _signed_up_client()
+    resp = c.get("/connected-accounts/freshdesk", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/connected-accounts"
+
+
+def test_shows_real_tool_names_and_descriptions():
+    """The page must reflect the adapter's actual ToolSpec list, not
+    hand-maintained copy — proves it by checking real tool names/
+    descriptions from the Freshdesk adapter appear verbatim, once connected."""
+    if not MONGO_AVAILABLE:
+        return
+    _reset_db()
+    c, user_id = _signed_up_client()
+    connections.create_connection(
+        user_id=user_id, provider="freshdesk", auth_type="api_key",
+        credentials={"domain": "x.freshdesk.com", "api_key": "fake"},
+    )
     resp = c.get("/connected-accounts/freshdesk")
     assert resp.status_code == 200
     assert "freshdesk_list_tickets" in resp.text
@@ -105,7 +122,11 @@ def test_shows_setup_instructions_for_all_clients():
     if not MONGO_AVAILABLE:
         return
     _reset_db()
-    c, _ = _signed_up_client()
+    c, user_id = _signed_up_client()
+    connections.create_connection(
+        user_id=user_id, provider="freshdesk", auth_type="api_key",
+        credentials={"domain": "x.freshdesk.com", "api_key": "fake"},
+    )
     resp = c.get("/connected-accounts/freshdesk")
     assert resp.status_code == 200
     assert "ChatGPT" in resp.text
@@ -134,6 +155,7 @@ if __name__ == "__main__":
         sys.exit(0)
     test_requires_login()
     test_unknown_provider_redirects_home()
+    test_tool_detail_hidden_before_connecting()
     test_shows_real_tool_names_and_descriptions()
     test_shows_setup_instructions_for_all_clients()
     test_shows_connected_status_after_connecting()

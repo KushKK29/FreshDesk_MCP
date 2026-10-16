@@ -7,6 +7,7 @@ any other MCP client at this server.
 Mounted the same way connected_accounts.py is, behind the hub-login gate.
 """
 import html
+import json
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -14,14 +15,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 try:
     import auth
     import connections
-    from adapters import ADAPTERS
+    from adapters import ADAPTERS, MCP_INSTRUCTIONS
     from connected_accounts import PROVIDER_DISPLAY_NAMES, PROVIDER_DOMAINS, favicon_url, _page_shell, _fmt_time, _EXTRA_STYLES
     from login_pages import SESSION_COOKIE_NAME
     from oauth_server import BASE_URL
 except ImportError:
     from src import auth
     from src import connections
-    from src.adapters import ADAPTERS
+    from src.adapters import ADAPTERS, MCP_INSTRUCTIONS
     from src.connected_accounts import PROVIDER_DISPLAY_NAMES, PROVIDER_DOMAINS, favicon_url, _page_shell, _fmt_time, _EXTRA_STYLES
     from src.login_pages import SESSION_COOKIE_NAME
     from src.oauth_server import BASE_URL
@@ -47,10 +48,16 @@ _DETAIL_STYLES = """
     .setup-card ol { margin:0; padding-left:18px; font-size:12.5px; color:var(--text); line-height:1.8; }
     .setup-card p { margin:0; font-size:12.5px; color:var(--text); line-height:1.7; }
     .mono { font-family:"JetBrains Mono", ui-monospace, monospace; }
-    .tool-row { border:1px solid var(--border); border-radius:10px; padding:13px 16px; background:var(--card); display:flex; align-items:flex-start; gap:12px; margin-bottom:8px; }
+    .tool-row { border:1px solid var(--border); border-radius:10px; padding:13px 16px; background:var(--card); margin-bottom:8px; }
+    .tool-row-head { display:flex; align-items:flex-start; gap:12px; }
     .tool-name { font-size:12px; font-weight:500; padding:3px 8px; background:var(--border-soft); border-radius:6px; white-space:nowrap; flex:none; }
     .tool-desc { flex:1 1 auto; font-size:13px; color:var(--text); line-height:1.5; }
     .tool-confirm-badge { font-size:10.5px; color:var(--danger); background:var(--danger-bg); padding:3px 8px; border-radius:6px; white-space:nowrap; flex:none; font-weight:500; }
+    .tool-schema { margin-top:10px; }
+    .tool-schema summary { font-size:11.5px; color:var(--muted); cursor:pointer; user-select:none; }
+    .tool-schema summary:hover { color:var(--text); }
+    .tool-schema pre { margin:8px 0 0; font-size:11.5px; font-family:"JetBrains Mono", ui-monospace, monospace; background:var(--bg); border:1px solid var(--border-soft); border-radius:8px; padding:10px 12px; overflow-x:auto; white-space:pre-wrap; word-break:break-word; color:var(--text); }
+    .mcp-instructions { font-size:13px; color:var(--text); line-height:1.6; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-bottom:28px; }
 """
 
 
@@ -96,11 +103,18 @@ def _setup_instructions_html() -> str:
 
 def _tool_row_html(spec) -> str:
     confirm_badge = '<div class="tool-confirm-badge">needs confirm</div>' if spec.requires_confirm else ""
+    schema_json = html.escape(json.dumps(spec.input_schema, indent=2))
     return f"""
     <div class="tool-row">
-      <div class="tool-name mono">{html.escape(spec.name)}</div>
-      <div class="tool-desc">{html.escape(spec.description)}</div>
-      {confirm_badge}
+      <div class="tool-row-head">
+        <div class="tool-name mono">{html.escape(spec.name)}</div>
+        <div class="tool-desc">{html.escape(spec.description)}</div>
+        {confirm_badge}
+      </div>
+      <details class="tool-schema">
+        <summary>Input schema</summary>
+        <pre>{schema_json}</pre>
+      </details>
     </div>
     """
 
@@ -143,6 +157,8 @@ def provider_detail_page(provider: str, request: Request):
         </div>
       </div>
       <div class="detail-sub">{meta}</div>
+
+      <div class="mcp-instructions">{html.escape(MCP_INSTRUCTIONS)}</div>
 
       {_setup_instructions_html()}
 

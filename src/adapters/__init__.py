@@ -9,6 +9,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
+# Single source of truth for the MCP server's top-level `instructions` field
+# (FastMCP(instructions=...) in mcp_http_server.py) — also rendered on
+# provider_detail.py so a hub user can see, in the UI, the same context an
+# agent gets over MCP, without importing mcp_http_server.py's heavier SDK deps.
+MCP_INSTRUCTIONS = (
+    "Connector hub for CRM and ticketing tools. Tools are namespaced by provider "
+    "(e.g. freshdesk_list_tickets, asana_list_tasks) and only appear for providers you've connected "
+    "from the Connected accounts page. Destructive, send, or bulk actions return a preview and a "
+    "confirm_token first; call the same tool again with that confirm_token to execute."
+)
+
 
 class AuthMode(Enum):
     OAUTH2 = "oauth2"

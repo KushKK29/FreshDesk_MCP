@@ -75,10 +75,7 @@ def _grant_for_token(token: str) -> dict | None:
 
 mcp = FastMCP(
     name="Connector Hub",
-    instructions="Connector hub for CRM and ticketing tools. Tools are namespaced by provider "
-    "(e.g. freshdesk_list_tickets, asana_list_tasks) and only appear for providers you've connected "
-    "from the Connected accounts page. Destructive, send, or bulk actions return a preview and a "
-    "confirm_token first; call the same tool again with that confirm_token to execute.",
+    instructions=adapters.MCP_INSTRUCTIONS,
     website_url=BASE_URL,
     token_verifier=MongoGrantTokenVerifier(),
     auth=AuthSettings(
