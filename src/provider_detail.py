@@ -114,17 +114,19 @@ def provider_detail_page(provider: str, request: Request):
     if provider not in PROVIDER_DISPLAY_NAMES or provider not in ADAPTERS:
         return RedirectResponse("/connected-accounts", status_code=302)
 
+    conn = connections.get_connection(user.user_id, provider)
+    if not conn:
+        # Tool list/descriptions are only shown for providers this user has
+        # actually connected — otherwise any logged-in user could browse
+        # every provider's full tool surface regardless of connection status.
+        return RedirectResponse("/connected-accounts", status_code=302)
+
     name = html.escape(PROVIDER_DISPLAY_NAMES[provider])
     adapter = ADAPTERS[provider]
     tools = adapter.tools()
 
-    conn = connections.get_connection(user.user_id, provider)
-    if conn:
-        status_badge = '<span style="display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:999px; background:var(--success-bg);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span><span style="font-size:11px; color:var(--success); font-weight:600;">Connected</span></span>'
-        meta = f"{len(tools)} tools · last used {html.escape(_fmt_time(conn.get('last_used_at')))}"
-    else:
-        status_badge = ""
-        meta = f"{len(tools)} tools · not connected yet"
+    status_badge = '<span style="display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:999px; background:var(--success-bg);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span><span style="font-size:11px; color:var(--success); font-weight:600;">Connected</span></span>'
+    meta = f"{len(tools)} tools · last used {html.escape(_fmt_time(conn.get('last_used_at')))}"
 
     tools_html = "".join(_tool_row_html(t) for t in tools)
 

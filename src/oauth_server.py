@@ -164,7 +164,7 @@ _PAGE_STYLES = """
       --success-bg: #dcfce7;
     }
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme="light"]) {
         --bg: #0a0a0b;
         --card: #111113;
         --border: #27272a;
@@ -181,6 +181,23 @@ _PAGE_STYLES = """
         --success: #4ade80;
         --success-bg: #052e16;
       }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0a0a0b;
+      --card: #111113;
+      --border: #27272a;
+      --border-soft: #1c1c1f;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --muted-soft: #71717a;
+      --accent: #f4f4f5;
+      --accent-hover: #ffffff;
+      --accent-text: #18181b;
+      --danger: #fbbf24;
+      --danger-bg: #422006;
+      --danger-border: #713f12;
+      --success: #4ade80;
+      --success-bg: #052e16;
     }
     * { box-sizing: border-box; }
     body {

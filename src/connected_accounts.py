@@ -76,7 +76,8 @@ _EXTRA_STYLES = """
     .sidebar-user { padding: 10px; border-radius: 9px; border: 1px solid var(--border); display: flex; align-items: center; gap: 9px; margin-top: auto; }
     .sidebar-avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--border-soft); flex: none; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--muted); }
     .sidebar-email { font-size: 12px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .logout-btn { background: none; border: none; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 11px; padding: 0; font-family: inherit; }
+    .logout-btn { background: var(--border-soft); border: 1px solid var(--border); color: var(--text); text-decoration: none; cursor: pointer; font-size: 11px; font-weight: 500; padding: 4px 10px; border-radius: 6px; font-family: inherit; margin-top: 4px; }
+    .logout-btn:hover { background: var(--border); }
     .main { flex: 1 1 auto; overflow-y: auto; }
     .main-inner { max-width: 920px; margin: 0 auto; padding: 36px 40px 48px 40px; }
     .page-title { margin: 0 0 5px 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
@@ -117,6 +118,12 @@ def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connec
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>{_PAGE_STYLES}{_EXTRA_STYLES}</style>
+  <script>
+    try {{
+      var t = localStorage.getItem("hub_theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    }} catch (e) {{}}
+  </script>
 </head>
 <body>
   <div class="shell">
@@ -126,6 +133,12 @@ def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connec
         <div class="logo-text">Connector Hub</div>
       </div>
       {nav_html}
+      <button type="button" class="nav-item" style="background:none; border:1px solid var(--border); cursor:pointer; width:100%; text-align:left; font-family:inherit;" onclick="(function(){{
+        var cur = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        var next = cur === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try {{ localStorage.setItem('hub_theme', next); }} catch (e) {{}}
+      }})()">Toggle theme</button>
       <div class="sidebar-user">
         <div class="sidebar-avatar">{html.escape(hub_email[:1].upper())}</div>
         <div style="flex:1 1 auto; min-width:0;">
@@ -174,31 +187,41 @@ def _connected_row(conn: dict, csrf: str) -> str:
     name = html.escape(PROVIDER_DISPLAY_NAMES.get(provider, provider))
     tool_count = _tool_count(provider)
     return f"""
-    <a href="/connected-accounts/{html.escape(provider)}" class="provider-row clickable">
-      <img src="{favicon_url(provider)}" class="provider-favicon" alt="">
-      <div style="flex:1 1 auto; min-width:0;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span class="provider-name">{name}</span>
-          {_status_row_dot_and_text(conn)}
+    <div class="provider-row">
+      <a href="/connected-accounts/{html.escape(provider)}" style="display:flex; align-items:center; gap:14px; flex:1 1 auto; min-width:0; text-decoration:none; color:inherit;">
+        <img src="{favicon_url(provider)}" class="provider-favicon" alt="">
+        <div style="flex:1 1 auto; min-width:0;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="provider-name">{name}</span>
+            {_status_row_dot_and_text(conn)}
+          </div>
+          <div class="provider-meta">{tool_count} tools · last used {html.escape(_fmt_time(conn.get("last_used_at")))}</div>
         </div>
-        <div class="provider-meta">{tool_count} tools · last used {html.escape(_fmt_time(conn.get("last_used_at")))}</div>
+      </a>
+      <div style="font-size:13px; color:var(--muted-soft); flex:none; display:flex; align-items:center; gap:14px;">
+        <a href="/connected-accounts/{html.escape(provider)}">View tools →</a>
+        <form method="post" action="/connected-accounts/disconnect" onsubmit="return confirm('Disconnect {name}? This deletes its stored credentials.');">
+          <input type="hidden" name="provider" value="{html.escape(provider)}">
+          <input type="hidden" name="csrf" value="{html.escape(csrf)}">
+          <button type="submit" style="padding:6px 12px; border-radius:7px; border:1px solid var(--border); background:transparent; color:var(--danger); font-size:12px; font-weight:500; cursor:pointer; font-family:inherit;">Disconnect</button>
+        </form>
       </div>
-      <div style="font-size:13px; color:var(--muted-soft); flex:none; display:flex; align-items:center; gap:18px;">
-        <div>View tools →</div>
-      </div>
-    </a>
+    </div>
     """
 
 
 def _available_row(provider: str) -> str:
+    # No tool count here: tool names/descriptions are only shown to a user
+    # who has actually connected the provider (provider_detail.py gates on
+    # that) — an uncounted "ready to connect" row keeps that boundary at the
+    # list level too, instead of leaking the tool surface before connecting.
     name = html.escape(PROVIDER_DISPLAY_NAMES[provider])
-    tool_count = _tool_count(provider)
     return f"""
     <div class="provider-row">
       <img src="{favicon_url(provider)}" class="provider-favicon" alt="">
       <div style="flex:1 1 auto; min-width:0;">
         <div class="provider-name">{name}</div>
-        <div class="provider-meta">{tool_count} tools · OAuth app configured</div>
+        <div class="provider-meta">OAuth app configured</div>
       </div>
       <a href="/connect/{provider}/start"><button type="button" class="connect-btn">Connect</button></a>
     </div>
@@ -207,14 +230,13 @@ def _available_row(provider: str) -> str:
 
 def _not_configured_row(provider: str) -> str:
     name = html.escape(PROVIDER_DISPLAY_NAMES[provider])
-    tool_count = _tool_count(provider)
     config = PROVIDER_OAUTH_CONFIG[provider]
     return f"""
     <div class="provider-row">
       <img src="{favicon_url(provider)}" class="provider-favicon" alt="" style="opacity:0.45;">
       <div style="flex:1 1 auto; min-width:0;">
         <div class="provider-name" style="color:var(--muted);">{name}</div>
-        <div class="provider-meta">{tool_count} tools · needs <code class="envvar">{html.escape(config['client_id_env'])}</code> and <code class="envvar">{html.escape(config['client_secret_env'])}</code></div>
+        <div class="provider-meta">needs <code class="envvar">{html.escape(config['client_id_env'])}</code> and <code class="envvar">{html.escape(config['client_secret_env'])}</code></div>
       </div>
       <div class="not-configured">Not configured</div>
     </div>
