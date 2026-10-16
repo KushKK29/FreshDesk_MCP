@@ -204,8 +204,18 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
     raise ToolError(f"unknown or disabled tool: {name}")
 
 
-mcp.list_tools = _list_tools_for_current_caller  # bound-method override, see docstring above
-mcp.call_tool = _call_tool_for_current_caller  # same reasoning: call_tool's default dispatch only knows about @mcp.tool()-registered functions, none of which exist here
+# Reassigning mcp.list_tools/mcp.call_tool as plain attributes does NOT
+# work: FastMCP.__init__ calls self._setup_handlers() once, which does
+# self._mcp_server.list_tools()(self.list_tools) — that decorator captures
+# the bound method reference at that moment and stores it in the low-level
+# Server's request_handlers dict. Reassigning mcp.list_tools afterward never
+# touches that dict, so every real tools/list call kept hitting the original
+# (empty, no @mcp.tool()-registered functions) handler — confirmed live:
+# ChatGPT and Claude Code both showed "connected, no tools" despite OAuth
+# succeeding. Re-registering directly with the low-level server's own
+# decorators is the only way to actually replace the handler.
+mcp._mcp_server.list_tools()(_list_tools_for_current_caller)
+mcp._mcp_server.call_tool(validate_input=False)(_call_tool_for_current_caller)
 
 
 # Mount the MCP streamable-HTTP app at / on top of the existing OAuth routes.
