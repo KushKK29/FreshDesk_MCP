@@ -131,6 +131,10 @@ def _page_shell(title: str, hub_email: str, body: str, active_nav: str = "connec
       var t = localStorage.getItem("hub_theme");
       if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     }} catch (e) {{}}
+    // ponytail: no WebSocket/SSE push exists, so another tab's changes (connect/disconnect,
+    // reauth) only show up here on reload — poll instead of a real push channel.
+    // Only reload when the tab is actually visible, so a background tab doesn't yank state.
+    setInterval(function() {{ if (document.visibilityState === "visible") location.reload(); }}, 30000);
   </script>
 </head>
 <body>

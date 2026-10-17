@@ -43,6 +43,7 @@ _OPS_STYLES = """
     .qa-score { font-size:20px; font-weight:700; }
     .qa-score.ok { color:var(--success); }
     .qa-score.warn { color:var(--danger); }
+    .qa-info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; border-radius:50%; border:1px solid var(--muted); color:var(--muted); font-size:10px; font-weight:600; margin-left:6px; cursor:help; vertical-align:middle; }
     .qa-issue-row { display:flex; justify-content:space-between; font-size:12.5px; padding:5px 0; border-top:1px solid var(--border-soft); }
     .sev-badge { font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; }
     .sev-badge.high { background:var(--danger-bg); color:var(--danger); }
@@ -119,7 +120,12 @@ def _quality_body(user_id: str) -> str:
     rows = [skipped_banner]
     for provider, data in result["results"].items():
         score = data["quality_score"]
-        score_html = f'<span class="qa-score {"ok" if score is None or score >= 80 else "warn"}">{score if score is not None else "—"}{"%" if score is not None else ""}</span>' if score is not None else '<span class="qa-score">—</span>'
+        score_title = "Percent of contacts with no missing/conflicting fields. Higher is better."
+        score_html = (
+            f'<span class="qa-score {"ok" if score is None or score >= 80 else "warn"}">'
+            f'{score if score is not None else "—"}{"%" if score is not None else ""}'
+            f'<span class="qa-info" title="{html.escape(score_title)}">i</span></span>'
+        )
         flagged_html = "".join(
             f'<div class="qa-issue-row"><span>{html.escape(f["name"] or "(no name)")} — {html.escape(", ".join(f["issues"]))}</span><span class="sev-badge {f["severity"]}">{f["severity"]}</span></div>'
             for f in data["flagged"][:25]

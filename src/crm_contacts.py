@@ -14,6 +14,7 @@ already produces. This module only adds normalization and the per-user
 "fetch everything I'm connected to" loop.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import adapters
@@ -135,15 +136,12 @@ def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, s
     duplicates because nothing's actually wrong" apart from "zero duplicates
     because HubSpot's fetch silently failed," instead of both looking the
     same."""
-    out = {}
-    errors = {}
-    for provider in CRM_PROVIDERS:
+    def _fetch_one(provider: str) -> tuple[str, list[dict] | None, str | None]:
         conn_row = connections.get_connection(user_id, provider)
         if not conn_row:
-            continue
+            return provider, None, None
         if conn_row["status"] != "active":
-            errors[provider] = f"connection status is {conn_row['status']} — reconnect from Connected accounts"
-            continue
+            return provider, None, f"connection status is {conn_row['status']} — reconnect from Connected accounts"
         conn = Connection(
             user_id=user_id, provider=provider, auth_type=conn_row["auth_type"],
             credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
@@ -159,24 +157,33 @@ def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, s
                 conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
             except Exception as exc:
                 connections.mark_needs_reauth(user_id, provider)
-                errors[provider] = f"session expired and could not be refreshed: {exc}"
-                continue
+                return provider, None, f"session expired and could not be refreshed: {exc}"
 
         try:
-            out[provider] = _FETCHERS[provider](conn)
+            return provider, _FETCHERS[provider](conn), None
         except Exception as exc:
             if conn.auth_type == "oauth2" and oauth_refresh.looks_like_auth_error(exc):
                 try:
                     conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
-                    out[provider] = _FETCHERS[provider](conn)
-                    continue
+                    return provider, _FETCHERS[provider](conn), None
                 except Exception as retry_exc:
                     connections.mark_needs_reauth(user_id, provider)
-                    errors[provider] = f"session expired and could not be refreshed: {retry_exc}"
-                    continue
+                    return provider, None, f"session expired and could not be refreshed: {retry_exc}"
             # ponytail: skip a provider whose fetch fails (API error, not an
             # auth error) rather than failing the whole cross-CRM analysis —
             # the error itself is returned for the UI to show, not swallowed.
-            errors[provider] = str(exc)
-            continue
+            return provider, None, str(exc)
+
+    out = {}
+    errors = {}
+    # Each provider is an independent, blocking network round-trip — fetching
+    # them one after another stacks their latencies (5 providers = 5x the
+    # slowest one). Run them concurrently instead; ThreadPoolExecutor because
+    # every call here (httpx, pymongo) is blocking I/O, not CPU-bound.
+    with ThreadPoolExecutor(max_workers=len(CRM_PROVIDERS)) as pool:
+        for provider, contacts, error in pool.map(_fetch_one, CRM_PROVIDERS):
+            if error:
+                errors[provider] = error
+            elif contacts is not None:
+                out[provider] = contacts
     return out, errors

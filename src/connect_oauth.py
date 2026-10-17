@@ -78,7 +78,7 @@ PROVIDER_OAUTH_CONFIG: dict[str, dict] = {
         "client_secret_env": "ZOHO_CLIENT_SECRET",
         "authorize_url": "https://accounts.zoho.com/oauth/v2/auth",  # default DC; multi-DC login landing still resolves to the user's own accounts server after auth
         "token_url": "https://accounts.zoho.com/oauth/v2/token",
-        "scopes": ["ZohoCRM.modules.ALL"],
+        "scopes": ["ZohoCRM.modules.ALL", "ZohoCRM.coql.READ"],
         "pkce": False,
         "dc_from_token_response": True,  # Zoho's token response includes "api_domain", from which the DC is derived — never from user input (SSRF guard)
         "extra_authorize_params": {"access_type": "offline"},  # without this Zoho never issues a refresh_token, so every connection silently degrades to needs_reauth once the access token expires
