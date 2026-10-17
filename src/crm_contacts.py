@@ -43,6 +43,7 @@ except ImportError:
 CRM_PROVIDERS = ["hubspot", "salesforce", "zoho", "outreach", "salesloft"]
 
 _FETCH_LIMIT = 200
+_HUBSPOT_FETCH_LIMIT = 100  # HubSpot's contacts endpoint caps at 100/request, unlike other providers' 200
 
 
 def _norm(provider: str, record_id, name: str | None, email: str | None, phone: str | None, company: str | None, raw: dict) -> dict:
@@ -61,7 +62,7 @@ def _fetch_hubspot(conn: Connection) -> list[dict]:
     token = conn.credentials["access_token"]
     raw = hs._request(
         "GET", token, "/crm/v3/objects/contacts",
-        params={"limit": _FETCH_LIMIT, "properties": "firstname,lastname,email,phone,company"},
+        params={"limit": _HUBSPOT_FETCH_LIMIT, "properties": "firstname,lastname,email,phone,company"},
     ).json().get("results", [])
     out = []
     for r in raw:

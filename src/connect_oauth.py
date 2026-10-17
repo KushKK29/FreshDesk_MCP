@@ -81,6 +81,7 @@ PROVIDER_OAUTH_CONFIG: dict[str, dict] = {
         "scopes": ["ZohoCRM.modules.ALL"],
         "pkce": False,
         "dc_from_token_response": True,  # Zoho's token response includes "api_domain", from which the DC is derived — never from user input (SSRF guard)
+        "extra_authorize_params": {"access_type": "offline"},  # without this Zoho never issues a refresh_token, so every connection silently degrades to needs_reauth once the access token expires
     },
     "outreach": {
         "client_id_env": "OUTREACH_CLIENT_ID",
@@ -149,6 +150,7 @@ def connect_start(provider: str, request: Request):
     if config["pkce"]:
         params["code_challenge"] = challenge
         params["code_challenge_method"] = "S256"
+    params.update(config.get("extra_authorize_params", {}))
     return RedirectResponse(f"{config['authorize_url']}?{urlencode(params)}", status_code=302)
 
 
