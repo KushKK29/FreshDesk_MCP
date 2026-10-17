@@ -13,9 +13,13 @@ here unchanged, same decrypted credentials connections.get_connection
 already produces. This module only adds normalization and the per-user
 "fetch everything I'm connected to" loop.
 """
+import time
+
 try:
+    import adapters
     import connections
     import hubspot_client as hs
+    import oauth_refresh
     import outreach_client as oc
     import salesforce_client as sf
     import salesloft_client as sl
@@ -24,8 +28,10 @@ try:
     from adapters import Connection
     from adapters.zoho import _resolve_host as _zoho_host
 except ImportError:
+    from src import adapters
     from src import connections
     from src import hubspot_client as hs
+    from src import oauth_refresh
     from src import outreach_client as oc
     from src import salesforce_client as sf
     from src import salesloft_client as sl
@@ -121,25 +127,55 @@ _FETCHERS = {
 }
 
 
-def fetch_all_contacts(user_id: str) -> dict[str, list[dict]]:
-    """Normalized contacts per connected CRM provider for this user. A
-    provider that's not connected, or whose fetch fails, is simply absent
-    from the result (not an error) — analysis tools below run on whatever
-    subset is actually available."""
+def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Normalized contacts per connected CRM provider for this user, plus a
+    second dict of {provider: reason} for any connected provider that was
+    skipped (not active, or its fetch raised) — so a caller can tell "zero
+    duplicates because nothing's actually wrong" apart from "zero duplicates
+    because HubSpot's fetch silently failed," instead of both looking the
+    same."""
     out = {}
+    errors = {}
     for provider in CRM_PROVIDERS:
         conn_row = connections.get_connection(user_id, provider)
-        if not conn_row or conn_row["status"] != "active":
+        if not conn_row:
+            continue
+        if conn_row["status"] != "active":
+            errors[provider] = f"connection status is {conn_row['status']} — reconnect from Connected accounts"
             continue
         conn = Connection(
             user_id=user_id, provider=provider, auth_type=conn_row["auth_type"],
             credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
         )
+        adapter = adapters.ADAPTERS[provider]
+
+        # Same proactive+reactive refresh mcp_http_server.py's real tool
+        # dispatch already does (oauth_refresh.py) — without this, a token
+        # that's simply expired looks identical to a genuine fetch failure,
+        # and silently drops that provider from every cross-CRM result.
+        if conn.auth_type == "oauth2" and conn.expires_at and time.time() > conn.expires_at - 120:
+            try:
+                conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
+            except Exception as exc:
+                connections.mark_needs_reauth(user_id, provider)
+                errors[provider] = f"session expired and could not be refreshed: {exc}"
+                continue
+
         try:
             out[provider] = _FETCHERS[provider](conn)
-        except Exception:
-            # ponytail: skip a provider whose fetch fails (expired token, API
-            # error) rather than failing the whole cross-CRM analysis; the UI
-            # surfaces which providers were actually included.
+        except Exception as exc:
+            if conn.auth_type == "oauth2" and oauth_refresh.looks_like_auth_error(exc):
+                try:
+                    conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
+                    out[provider] = _FETCHERS[provider](conn)
+                    continue
+                except Exception as retry_exc:
+                    connections.mark_needs_reauth(user_id, provider)
+                    errors[provider] = f"session expired and could not be refreshed: {retry_exc}"
+                    continue
+            # ponytail: skip a provider whose fetch fails (API error, not an
+            # auth error) rather than failing the whole cross-CRM analysis —
+            # the error itself is returned for the UI to show, not swallowed.
+            errors[provider] = str(exc)
             continue
-    return out
+    return out, errors

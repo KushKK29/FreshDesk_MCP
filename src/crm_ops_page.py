@@ -75,12 +75,22 @@ def _no_crm_connected_html() -> str:
     return '<div class="ops-empty">Connect at least one CRM (HubSpot, Salesforce, Zoho, Outreach, or SalesLoft) from <a href="/connected-accounts">Connected accounts</a> to run cross-CRM analysis.</div>'
 
 
+def _skipped_html(providers_skipped: dict[str, str]) -> str:
+    if not providers_skipped:
+        return ""
+    lines = "".join(
+        f'<div>{html.escape(_provider_name(p))}: {html.escape(reason)}</div>'
+        for p, reason in providers_skipped.items()
+    )
+    return f'<div class="dup-conflict" style="margin-bottom:16px;">⚠ Not included in this result —<br>{lines}</div>'
+
+
 def _duplicates_body(user_id: str) -> str:
     if _connected_crm_count(user_id) == 0:
         return _no_crm_connected_html()
     result = crm_ops.find_duplicates(user_id)
     checked = ", ".join(_provider_name(p) for p in result["providers_checked"]) or "none"
-    header = f'<div class="page-sub" style="margin-bottom:20px;">Checked {result["total_contacts_checked"]} contacts across {html.escape(checked)}.</div>'
+    header = f'<div class="page-sub" style="margin-bottom:20px;">Checked {result["total_contacts_checked"]} contacts across {html.escape(checked)}.</div>' + _skipped_html(result["providers_skipped"])
     if not result["duplicate_groups"]:
         return header + '<div class="ops-empty">No cross-CRM duplicates found.</div>'
     groups_html = []
@@ -103,9 +113,10 @@ def _quality_body(user_id: str) -> str:
     if _connected_crm_count(user_id) == 0:
         return _no_crm_connected_html()
     result = crm_ops.data_quality_audit(user_id)
+    skipped_banner = _skipped_html(result["providers_skipped"])
     if not result["results"]:
-        return '<div class="ops-empty">No connected CRM has any contacts to audit.</div>'
-    rows = []
+        return skipped_banner + '<div class="ops-empty">No connected CRM has any contacts to audit.</div>'
+    rows = [skipped_banner]
     for provider, data in result["results"].items():
         score = data["quality_score"]
         score_html = f'<span class="qa-score {"ok" if score is None or score >= 80 else "warn"}">{score if score is not None else "—"}{"%" if score is not None else ""}</span>' if score is not None else '<span class="qa-score">—</span>'
@@ -139,8 +150,9 @@ def _r360_body(user_id: str, email: str | None) -> str:
     if _connected_crm_count(user_id) == 0:
         return form + _no_crm_connected_html()
     result = crm_ops.customer_360(user_id, email)
+    skipped_banner = _skipped_html(result["providers_skipped"])
     if not result["records"]:
-        return form + f'<div class="ops-empty">No matching contact found for {html.escape(email)} in any connected CRM.</div>'
+        return form + skipped_banner + f'<div class="ops-empty">No matching contact found for {html.escape(email)} in any connected CRM.</div>'
     records_html = "".join(f"""
         <div class="r360-record">
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
@@ -150,7 +162,7 @@ def _r360_body(user_id: str, email: str | None) -> str:
           <div style="font-size:12.5px; color:var(--muted);">{html.escape(r["company"] or "no company")} · {html.escape(r["phone"] or "no phone")}</div>
         </div>
     """ for r in result["records"])
-    return form + f'<div class="page-sub" style="margin-bottom:16px;">Found in {len(result["found_in"])} of {len(result["providers_checked"])} connected CRMs.</div>' + records_html
+    return form + skipped_banner + f'<div class="page-sub" style="margin-bottom:16px;">Found in {len(result["found_in"])} of {len(result["providers_checked"])} connected CRMs.</div>' + records_html
 
 
 def _ops_page(active: str, hub_email: str, body: str) -> str:

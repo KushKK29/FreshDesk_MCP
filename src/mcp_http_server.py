@@ -35,6 +35,7 @@ try:
     import confirm_tokens
     import crm_contacts
     import crm_ops  # noqa: F401 — import-time side effect registers CrmOpsAdapter into adapters.ADAPTERS
+    import oauth_refresh
     from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 except ImportError:
     from src import adapters
@@ -42,6 +43,7 @@ except ImportError:
     from src import confirm_tokens
     from src import crm_contacts
     from src import crm_ops  # noqa: F401
+    from src import oauth_refresh
     from src.oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 
 adapters.register_all_adapters()
@@ -173,21 +175,6 @@ async def _list_tools_for_current_caller() -> list[MCPTool]:
     return [_tool_spec_to_mcp_tool(spec) for spec, _provider in _active_adapter_tools_for_user(grant["user_id"])]
 
 
-def _looks_like_auth_error(exc: Exception) -> bool:
-    # Every provider client raises a generic {Provider}Error with the HTTP
-    # status embedded in the message (f"{method} {path} -> {status}: ..."),
-    # not a typed exception per status code — matching the string is what
-    # the rest of this codebase already does for the same reason.
-    message = str(exc)
-    return "-> 401" in message or "INVALID_SESSION_ID" in message
-
-
-def _refresh_and_persist(adapter: adapters.ProviderAdapter, conn: adapters.Connection, provider: str) -> adapters.Connection:
-    refreshed = adapter.refresh(conn)
-    connections.update_credentials(conn.user_id, provider, refreshed.credentials, refreshed.expires_at)
-    return refreshed
-
-
 async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
     token = _current_access_token()
     grant = _grant_for_token(token)
@@ -236,7 +223,7 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
         # providers whose expiry we don't track.
         if conn.auth_type == "oauth2" and conn.expires_at and time.time() > conn.expires_at - 120:
             try:
-                conn = _refresh_and_persist(adapter, conn, provider)
+                conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
             except Exception as exc:
                 connections.mark_needs_reauth(grant["user_id"], provider)
                 raise ToolError(f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.") from exc
@@ -244,14 +231,14 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
         try:
             result = adapter.call(name, call_args, conn)
         except Exception as exc:
-            if conn.auth_type != "oauth2" or not _looks_like_auth_error(exc):
+            if conn.auth_type != "oauth2" or not oauth_refresh.looks_like_auth_error(exc):
                 raise
             # Reactive refresh: one retry, not a loop (same ceiling as the
             # rest of this codebase's HTTP clients) — if the refreshed token
             # still fails, the connection is marked needs_reauth and the
             # error surfaces to the caller instead of retrying forever.
             try:
-                conn = _refresh_and_persist(adapter, conn, provider)
+                conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
             except Exception:
                 connections.mark_needs_reauth(grant["user_id"], provider)
                 raise ToolError(f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.") from exc

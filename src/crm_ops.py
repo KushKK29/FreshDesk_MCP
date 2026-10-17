@@ -28,7 +28,7 @@ def _group_key(contact: dict) -> str | None:
 
 
 def find_duplicates(user_id: str) -> dict:
-    by_provider = fetch_all_contacts(user_id)
+    by_provider, fetch_errors = fetch_all_contacts(user_id)
     groups: dict[str, list[dict]] = {}
     for provider, contacts in by_provider.items():
         for c in contacts:
@@ -56,6 +56,7 @@ def find_duplicates(user_id: str) -> dict:
 
     return {
         "providers_checked": list(by_provider.keys()),
+        "providers_skipped": fetch_errors,
         "duplicate_groups": duplicate_groups,
         "total_contacts_checked": sum(len(v) for v in by_provider.values()),
     }
@@ -79,7 +80,7 @@ def _quality_issues(contact: dict) -> list[str]:
 
 
 def data_quality_audit(user_id: str) -> dict:
-    by_provider = fetch_all_contacts(user_id)
+    by_provider, fetch_errors = fetch_all_contacts(user_id)
     per_provider_results = {}
     for provider, contacts in by_provider.items():
         flagged = []
@@ -96,12 +97,12 @@ def data_quality_audit(user_id: str) -> dict:
             "quality_score": round(100 * clean / total, 1) if total else None,
             "flagged": flagged,
         }
-    return {"providers_checked": list(by_provider.keys()), "results": per_provider_results}
+    return {"providers_checked": list(by_provider.keys()), "providers_skipped": fetch_errors, "results": per_provider_results}
 
 
 def customer_360(user_id: str, email: str) -> dict:
     email = email.strip().lower()
-    by_provider = fetch_all_contacts(user_id)
+    by_provider, fetch_errors = fetch_all_contacts(user_id)
     matches = []
     for provider, contacts in by_provider.items():
         for c in contacts:
@@ -116,6 +117,7 @@ def customer_360(user_id: str, email: str) -> dict:
     return {
         "email": email,
         "providers_checked": list(by_provider.keys()),
+        "providers_skipped": fetch_errors,
         "found_in": [m["provider"] for m in matches],
         "records": matches,
     }
