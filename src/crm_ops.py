@@ -62,6 +62,20 @@ def find_duplicates(user_id: str) -> dict:
     }
 
 
+def field_conflicts(user_id: str) -> dict:
+    """Full per-record detail behind find_duplicates's conflicting_fields
+    summary: every field value, per provider, for each cross-CRM duplicate
+    group that disagrees on name/phone/company."""
+    dup_result = find_duplicates(user_id)
+    conflicts = [g for g in dup_result["duplicate_groups"] if g["conflicting_fields"]]
+    return {
+        "providers_checked": dup_result["providers_checked"],
+        "providers_skipped": dup_result["providers_skipped"],
+        "conflict_groups": conflicts,
+        "total_conflicts": len(conflicts),
+    }
+
+
 def _quality_issues(contact: dict) -> list[str]:
     issues = []
     if not contact["email"]:
@@ -150,6 +164,14 @@ class CrmOpsAdapter:
                 input_schema={"type": "object", "properties": {}},
             ),
             ToolSpec(
+                name="crm_ops_field_conflicts",
+                description=(
+                    "Full per-record detail for cross-CRM duplicates whose name/phone/company values "
+                    "disagree across providers: every value, labeled by source provider, for each conflicting group."
+                ),
+                input_schema={"type": "object", "properties": {}},
+            ),
+            ToolSpec(
                 name="crm_ops_customer_360",
                 description=(
                     "Given an email address, find every matching contact record across connected CRMs and "
@@ -164,6 +186,8 @@ class CrmOpsAdapter:
             return find_duplicates(conn.user_id)
         if tool == "crm_ops_data_quality_audit":
             return data_quality_audit(conn.user_id)
+        if tool == "crm_ops_field_conflicts":
+            return field_conflicts(conn.user_id)
         if tool == "crm_ops_customer_360":
             return customer_360(conn.user_id, args["email"])
         raise ValueError(f"unknown tool: {tool}")

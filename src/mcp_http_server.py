@@ -35,6 +35,7 @@ try:
     import confirm_tokens
     import crm_contacts
     import crm_ops  # noqa: F401 — import-time side effect registers CrmOpsAdapter into adapters.ADAPTERS
+    import support_ops  # noqa: F401 — same pattern, registers SupportOpsAdapter
     import oauth_refresh
     from oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 except ImportError:
@@ -43,6 +44,7 @@ except ImportError:
     from src import confirm_tokens
     from src import crm_contacts
     from src import crm_ops  # noqa: F401
+    from src import support_ops  # noqa: F401
     from src import oauth_refresh
     from src.oauth_server import BASE_URL, _grants, _sha256, app as oauth_app
 
@@ -134,6 +136,13 @@ def _active_adapter_tools_for_user(user_id: str) -> list[tuple[adapters.ToolSpec
         crm_ops_adapter = adapters.ADAPTERS.get("crm_ops")
         if crm_ops_adapter:
             out.extend((spec, "crm_ops") for spec in crm_ops_adapter.tools())
+
+    # support_ops needs Freshdesk connected — its tools read Freshdesk
+    # tickets (plus CRM contacts when available) same gate pattern as crm_ops above.
+    if any(r["provider"] == "freshdesk" for r in active_rows):
+        support_ops_adapter = adapters.ADAPTERS.get("support_ops")
+        if support_ops_adapter:
+            out.extend((spec, "support_ops") for spec in support_ops_adapter.tools())
     return out
 
 
@@ -200,10 +209,10 @@ async def _call_tool_for_current_caller(name: str, arguments: dict) -> dict:
                 new_token = confirm_tokens.issue(grant["user_id"], provider, name, call_args)
                 return {"preview": call_args, "confirm_token": new_token, "message": f"This action ({name}) requires confirmation. Call it again with this confirm_token to execute."}
 
-        if provider == "crm_ops":
-            # No credentials of its own — crm_ops.call() reads conn.user_id
-            # only, to re-fetch the other providers' already-stored connections.
-            result = adapters.ADAPTERS["crm_ops"].call(name, call_args, adapters.Connection(user_id=grant["user_id"], provider="crm_ops", auth_type="none", credentials={}))
+        if provider in ("crm_ops", "support_ops"):
+            # No credentials of their own — both read conn.user_id only, to
+            # re-fetch the other providers' already-stored connections.
+            result = adapters.ADAPTERS[provider].call(name, call_args, adapters.Connection(user_id=grant["user_id"], provider=provider, auth_type="none", credentials={}))
             return result
 
         conn_row = connections.get_connection(grant["user_id"], provider)

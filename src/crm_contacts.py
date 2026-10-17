@@ -89,7 +89,8 @@ def _fetch_salesforce(conn: Connection) -> list[dict]:
 def _fetch_zoho(conn: Connection) -> list[dict]:
     host = _zoho_host(conn.credentials["dc"])
     token = conn.credentials["access_token"]
-    raw = zh.query_coql(host, token, f"SELECT id, Full_Name, Email, Phone, Account_Name FROM Contacts LIMIT {_FETCH_LIMIT}")
+    # COQL requires a WHERE clause (unlike SQL) — "id is not null" matches every record.
+    raw = zh.query_coql(host, token, f"SELECT id, Full_Name, Email, Phone, Account_Name FROM Contacts WHERE id is not null LIMIT {_FETCH_LIMIT}")
     out = []
     for r in raw:
         account_name = r.get("Account_Name")
