@@ -44,9 +44,14 @@ def _request(method: str, domain: str, api_key: str, path: str, **kwargs) -> htt
 
 
 def list_tickets_for(
-    domain: str, api_key: str, status: str | None = None, updated_since: str | None = None, page: int = 1
+    domain: str, api_key: str, status: str | None = None, updated_since: str | None = None, page: int = 1,
+    include: str | None = None, per_page: int | None = None,
 ) -> list[dict]:
     params = {"page": page}
+    if include:
+        params["include"] = include  # e.g. "requester,stats" — one call instead of one per ticket
+    if per_page:
+        params["per_page"] = per_page
     if status:
         params["filter"] = status
     if updated_since:

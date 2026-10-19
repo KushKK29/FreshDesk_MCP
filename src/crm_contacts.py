@@ -130,43 +130,46 @@ _FETCHERS = {
 }
 
 
-def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, str]]:
-    """Normalized contacts per connected CRM provider for this user, plus a
-    second dict of {provider: reason} for any connected provider that was
-    skipped (not active, or its fetch raised) — so a caller can tell "zero
-    duplicates because nothing's actually wrong" apart from "zero duplicates
-    because HubSpot's fetch silently failed," instead of both looking the
-    same."""
-    def _fetch_one(provider: str) -> tuple[str, list[dict] | None, str | None]:
-        conn_row = connections.get_connection(user_id, provider)
-        if not conn_row:
-            return provider, None, None
-        if conn_row["status"] != "active":
-            return provider, None, f"connection status is {conn_row['status']} — reconnect from Connected accounts"
-        conn = Connection(
-            user_id=user_id, provider=provider, auth_type=conn_row["auth_type"],
-            credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
-        )
-        adapter = adapters.ADAPTERS[provider]
-
-        # Same proactive+reactive refresh mcp_http_server.py's real tool
-        # dispatch already does (oauth_refresh.py) — without this, a token
-        # that's simply expired looks identical to a genuine fetch failure,
-        # and silently drops that provider from every cross-CRM result.
-        if conn.auth_type == "oauth2" and conn.expires_at and time.time() > conn.expires_at - 120:
-            try:
-                conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
-            except Exception as exc:
-                connections.mark_needs_reauth(user_id, provider)
-                return provider, None, f"session expired and could not be refreshed: {exc}"
-
+def get_fresh_conn(user_id: str, provider: str) -> tuple[Connection | None, str | None]:
+    """Active connection for (user, provider), token proactively refreshed if
+    near expiry. Returns (conn, None), (None, None) if not connected, or
+    (None, reason) if inactive/unrefreshable."""
+    conn_row = connections.get_connection(user_id, provider)
+    if not conn_row:
+        return None, None
+    if conn_row["status"] != "active":
+        return None, f"connection status is {conn_row['status']} — reconnect from Connected accounts"
+    conn = Connection(
+        user_id=user_id, provider=provider, auth_type=conn_row["auth_type"],
+        credentials=conn_row["credentials"], scopes=conn_row.get("scopes", []), expires_at=conn_row.get("expires_at"),
+    )
+    # Proactive refresh, same as mcp_http_server.py's dispatch — without it an
+    # expired token looks identical to a genuine fetch failure.
+    if conn.auth_type == "oauth2" and conn.expires_at and time.time() > conn.expires_at - 120:
         try:
-            return provider, _FETCHERS[provider](conn), None
+            conn = oauth_refresh.refresh_and_persist(adapters.ADAPTERS[provider], conn, provider)
+        except Exception as exc:
+            connections.mark_needs_reauth(user_id, provider)
+            return None, f"session expired and could not be refreshed: {exc}"
+    return conn, None
+
+
+def fetch_all(user_id: str, fetchers: dict) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Run `fetchers` ({provider: fn(conn) -> list[dict]}) concurrently for
+    every provider this user has connected. Returns ({provider: rows},
+    {provider: skip_reason}) so "nothing found" is distinguishable from
+    "fetch silently failed"."""
+    def _fetch_one(provider: str) -> tuple[str, list[dict] | None, str | None]:
+        conn, err = get_fresh_conn(user_id, provider)
+        if not conn:
+            return provider, None, err
+        try:
+            return provider, fetchers[provider](conn), None
         except Exception as exc:
             if conn.auth_type == "oauth2" and oauth_refresh.looks_like_auth_error(exc):
                 try:
-                    conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
-                    return provider, _FETCHERS[provider](conn), None
+                    conn = oauth_refresh.refresh_and_persist(adapters.ADAPTERS[provider], conn, provider)
+                    return provider, fetchers[provider](conn), None
                 except Exception as retry_exc:
                     connections.mark_needs_reauth(user_id, provider)
                     return provider, None, f"session expired and could not be refreshed: {retry_exc}"
@@ -175,16 +178,116 @@ def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, s
             # the error itself is returned for the UI to show, not swallowed.
             return provider, None, str(exc)
 
-    out = {}
-    errors = {}
-    # Each provider is an independent, blocking network round-trip — fetching
-    # them one after another stacks their latencies (5 providers = 5x the
-    # slowest one). Run them concurrently instead; ThreadPoolExecutor because
-    # every call here (httpx, pymongo) is blocking I/O, not CPU-bound.
-    with ThreadPoolExecutor(max_workers=len(CRM_PROVIDERS)) as pool:
-        for provider, contacts, error in pool.map(_fetch_one, CRM_PROVIDERS):
+    out, errors = {}, {}
+    # Independent blocking network round-trips: run concurrently, not 5x serial.
+    with ThreadPoolExecutor(max_workers=max(len(fetchers), 1)) as pool:
+        for provider, rows, error in pool.map(_fetch_one, list(fetchers)):
             if error:
                 errors[provider] = error
-            elif contacts is not None:
-                out[provider] = contacts
+            elif rows is not None:
+                out[provider] = rows
     return out, errors
+
+
+def fetch_all_contacts(user_id: str) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Normalized contacts per connected CRM provider, plus {provider: reason}
+    for any connected provider that was skipped."""
+    return fetch_all(user_id, _FETCHERS)
+
+
+# --- Deals (open pipeline) -------------------------------------------------
+# Normalized: {provider, id, name, amount, stage, is_closed, account,
+# contact_ids, last_activity (ISO str|None), raw}. `account` is the company
+# name used to join to Freshdesk requesters; HubSpot deals carry no company
+# inline, so they come with contact_ids and the caller resolves via contacts.
+
+def _deal(provider, rid, name, amount, stage, is_closed, account, contact_ids, last_activity, raw) -> dict:
+    try:
+        amount = float(amount) if amount not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        amount = 0.0
+    return {
+        "provider": provider, "id": str(rid) if rid is not None else None, "name": name or "",
+        "amount": amount, "stage": stage or "", "is_closed": bool(is_closed),
+        "account": (account or "").strip(), "contact_ids": [str(c) for c in contact_ids],
+        "last_activity": last_activity, "raw": raw,
+    }
+
+
+def _deals_hubspot(conn: Connection) -> list[dict]:
+    raw = hs._request(
+        "GET", conn.credentials["access_token"], "/crm/v3/objects/deals",
+        params={"limit": _HUBSPOT_FETCH_LIMIT, "associations": "contacts",
+                "properties": "dealname,amount,dealstage,hs_is_closed,notes_last_updated,hs_lastmodifieddate"},
+    ).json().get("results", [])
+    out = []
+    for r in raw:
+        p = r.get("properties", {})
+        assoc = (r.get("associations") or {}).get("contacts", {}).get("results", [])
+        out.append(_deal("hubspot", r.get("id"), p.get("dealname"), p.get("amount"), p.get("dealstage"),
+                         str(p.get("hs_is_closed")).lower() == "true", "", [a["id"] for a in assoc],
+                         p.get("notes_last_updated") or p.get("hs_lastmodifieddate"), r))
+    return out
+
+
+def _deals_salesforce(conn: Connection) -> list[dict]:
+    soql = soql_guard.validate_and_cap(
+        f"SELECT Id, Name, Amount, StageName, IsClosed, Account.Name, LastActivityDate, LastModifiedDate FROM Opportunity LIMIT {_FETCH_LIMIT}")
+    out = []
+    for r in sf.query_soql(conn.credentials["instance_url"], conn.credentials["access_token"], soql):
+        acct = r.get("Account")
+        out.append(_deal("salesforce", r.get("Id"), r.get("Name"), r.get("Amount"), r.get("StageName"), r.get("IsClosed"),
+                         acct.get("Name") if isinstance(acct, dict) else None, [],
+                         r.get("LastActivityDate") or r.get("LastModifiedDate"), r))
+    return out
+
+
+def _deals_zoho(conn: Connection) -> list[dict]:
+    raw = zh.query_coql(
+        _zoho_host(conn.credentials["dc"]), conn.credentials["access_token"],
+        f"SELECT id, Deal_Name, Amount, Stage, Account_Name, Last_Activity_Time, Modified_Time FROM Deals WHERE id is not null LIMIT {_FETCH_LIMIT}")
+    out = []
+    for r in raw:
+        acct = r.get("Account_Name")
+        stage = r.get("Stage") or ""
+        out.append(_deal("zoho", r.get("id"), r.get("Deal_Name"), r.get("Amount"), stage, stage.lower().startswith("closed"),
+                         acct.get("name") if isinstance(acct, dict) else acct, [],
+                         r.get("Last_Activity_Time") or r.get("Modified_Time"), r))
+    return out
+
+
+_DEAL_FETCHERS = {"hubspot": _deals_hubspot, "salesforce": _deals_salesforce, "zoho": _deals_zoho}
+
+
+def fetch_all_deals(user_id: str) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    return fetch_all(user_id, _DEAL_FETCHERS)
+
+
+# --- Sequence / cadence memberships (Outreach, SalesLoft) -------------------
+# Normalized: {provider, id (membership id), contact_id, active, state}.
+
+def _memberships_outreach(conn: Connection) -> list[dict]:
+    out = []
+    for r in oc.list_resource(conn.credentials["access_token"], "sequenceStates"):
+        state = (r.get("attributes") or {}).get("state")
+        prospect = ((r.get("relationships") or {}).get("prospect") or {}).get("data") or {}
+        out.append({"provider": "outreach", "id": str(r.get("id")), "contact_id": str(prospect.get("id")),
+                    "active": state == "active", "state": state})
+    return out
+
+
+def _memberships_salesloft(conn: Connection) -> list[dict]:
+    out = []
+    for r in sl.list_resource(conn.credentials["access_token"], "cadence_memberships", {"per_page": _FETCH_LIMIT}):
+        person = r.get("person") or {}
+        active = bool(r.get("currently_on_cadence")) and not r.get("paused")
+        out.append({"provider": "salesloft", "id": str(r.get("id")), "contact_id": str(person.get("id")),
+                    "active": active, "state": "active" if active else "inactive"})
+    return out
+
+
+_MEMBERSHIP_FETCHERS = {"outreach": _memberships_outreach, "salesloft": _memberships_salesloft}
+
+
+def fetch_all_memberships(user_id: str) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    return fetch_all(user_id, _MEMBERSHIP_FETCHERS)

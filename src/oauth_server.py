@@ -679,6 +679,7 @@ try:
     import connect_oauth
     import provider_detail
     import crm_ops_page
+    import ops_api
     from adapters import register_all_adapters
 except ImportError:
     from src import login_pages
@@ -686,6 +687,7 @@ except ImportError:
     from src import connect_oauth
     from src import provider_detail
     from src import crm_ops_page
+    from src import ops_api
     from src.adapters import register_all_adapters
 
 register_all_adapters()  # every adapter module registers itself into ADAPTERS — needed by connect_oauth.py's verify() call and mcp_http_server.py's tool dispatch, whichever entrypoint runs first
@@ -694,3 +696,9 @@ app.include_router(connected_accounts.router)
 app.include_router(provider_detail.router)
 app.include_router(connect_oauth.router)
 app.include_router(crm_ops_page.router)
+app.include_router(ops_api.router)
+
+# The Ops UI is a separate static site. Bearer-token auth (no cookies), so
+# any origin is safe to allow; set OPS_UI_ORIGIN to lock it down in prod.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+app.add_middleware(CORSMiddleware, allow_origins=[os.environ.get("OPS_UI_ORIGIN", "*")], allow_methods=["*"], allow_headers=["*"])
