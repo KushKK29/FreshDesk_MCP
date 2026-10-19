@@ -211,7 +211,11 @@ class AsanaAdapter:
             raise az.AsanaError(f"refresh failed: {resp.status_code}: {resp.text}")
         body = resp.json()
         conn.credentials["access_token"] = body["access_token"]
-        conn.expires_at = time.time() + body["expires_in"]
+        # ponytail: Salesforce's refresh response omits expires_in entirely —
+        # same root cause that silently broke its proactive refresh. Falling
+        # back here instead of crashing/storing None if any provider ever
+        # drops the field on a refresh response too.
+        conn.expires_at = time.time() + body.get("expires_in", 3600)
         return conn
 
     def verify(self, conn: Connection) -> None:

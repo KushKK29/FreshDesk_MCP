@@ -198,7 +198,9 @@ class ZohoAdapter:
             raise zh.ZohoError(f"refresh failed: {resp.status_code}: {resp.text}")
         body = resp.json()
         conn.credentials["access_token"] = body["access_token"]
-        conn.expires_at = time.time() + body["expires_in"]
+        # ponytail: defensive fallback, same reasoning as asana.py/salesforce.py —
+        # don't crash/store None if a refresh response ever omits expires_in.
+        conn.expires_at = time.time() + body.get("expires_in", 3600)
         return conn
 
     def verify(self, conn: Connection) -> None:

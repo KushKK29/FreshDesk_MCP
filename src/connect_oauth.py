@@ -217,7 +217,13 @@ def connect_callback(provider: str, request: Request, code: str | None = Query(N
         if not dc:
             return HTMLResponse(_error_page("Connection failed", "Zoho returned an unrecognized data center."), status_code=502)
         credentials["dc"] = dc
-    expires_at = time.time() + token_body["expires_in"] if "expires_in" in token_body else None
+    # ponytail: fall back to a conservative fixed window instead of None when
+    # a provider's token response omits expires_in (Salesforce always does;
+    # a safety net here for any other provider too) — without this,
+    # mcp_http_server.py's proactive-refresh check (`conn.expires_at and ...`)
+    # never fires because None is falsy, and the connection silently relies
+    # on reactive-retry-on-401 only until that too fails and it's needs_reauth.
+    expires_at = time.time() + token_body.get("expires_in", 7200)
 
     adapter = ADAPTERS.get(provider)
     if adapter:
