@@ -232,3 +232,18 @@ def crm_ops_360(email: str, authorization: str | None = Header(None)):
 @router.get("/crm-ops/search")
 def crm_ops_search(q: str, authorization: str | None = Header(None)):
     return crm_ops.customer_search(_user(authorization).user_id, q)
+
+
+@router.get("/crm-ops/duplicates-fuzzy")
+def crm_ops_duplicates_fuzzy(authorization: str | None = Header(None)):
+    return crm_ops.find_duplicates_fuzzy(_user(authorization).user_id)
+
+
+@router.get("/crm-ops/conflicts")
+def crm_ops_conflicts(authorization: str | None = Header(None)):
+    return crm_ops.field_conflicts_with_suggestion(_user(authorization).user_id)
+
+
+@router.get("/crm-ops/stale")
+def crm_ops_stale(days: int = 90, authorization: str | None = Header(None)):
+    return crm_ops.stale_contact_finder(_user(authorization).user_id, days)

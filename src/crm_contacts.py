@@ -47,7 +47,7 @@ _FETCH_LIMIT = 200
 _HUBSPOT_FETCH_LIMIT = 100  # HubSpot's contacts endpoint caps at 100/request, unlike other providers' 200
 
 
-def _norm(provider: str, record_id, name: str | None, email: str | None, phone: str | None, company: str | None, raw: dict) -> dict:
+def _norm(provider: str, record_id, name: str | None, email: str | None, phone: str | None, company: str | None, raw: dict, last_activity: str | None = None) -> dict:
     return {
         "provider": provider,
         "id": str(record_id) if record_id is not None else None,
@@ -55,6 +55,7 @@ def _norm(provider: str, record_id, name: str | None, email: str | None, phone: 
         "email": (email or "").strip().lower(),
         "phone": "".join(ch for ch in (phone or "") if ch.isdigit()),
         "company": (company or "").strip(),
+        "last_activity": last_activity,
         "raw": raw,
     }
 
@@ -63,26 +64,28 @@ def _fetch_hubspot(conn: Connection) -> list[dict]:
     token = conn.credentials["access_token"]
     raw = hs._request(
         "GET", token, "/crm/v3/objects/contacts",
-        params={"limit": _HUBSPOT_FETCH_LIMIT, "properties": "firstname,lastname,email,phone,company"},
+        params={"limit": _HUBSPOT_FETCH_LIMIT, "properties": "firstname,lastname,email,phone,company,notes_last_updated,lastmodifieddate"},
     ).json().get("results", [])
     out = []
     for r in raw:
         props = r.get("properties", {})
         name = " ".join(p for p in [props.get("firstname"), props.get("lastname")] if p)
-        out.append(_norm("hubspot", r.get("id"), name, props.get("email"), props.get("phone"), props.get("company"), r))
+        out.append(_norm("hubspot", r.get("id"), name, props.get("email"), props.get("phone"), props.get("company"), r,
+                          props.get("notes_last_updated") or props.get("lastmodifieddate")))
     return out
 
 
 def _fetch_salesforce(conn: Connection) -> list[dict]:
     instance_url = conn.credentials["instance_url"]
     token = conn.credentials["access_token"]
-    soql = soql_guard.validate_and_cap(f"SELECT Id, Name, Email, Phone, Account.Name FROM Contact LIMIT {_FETCH_LIMIT}")
+    soql = soql_guard.validate_and_cap(f"SELECT Id, Name, Email, Phone, Account.Name, LastActivityDate, LastModifiedDate FROM Contact LIMIT {_FETCH_LIMIT}")
     raw = sf.query_soql(instance_url, token, soql)
     out = []
     for r in raw:
         account = r.get("Account")
         company = account.get("Name") if isinstance(account, dict) else None
-        out.append(_norm("salesforce", r.get("Id"), r.get("Name"), r.get("Email"), r.get("Phone"), company, r))
+        out.append(_norm("salesforce", r.get("Id"), r.get("Name"), r.get("Email"), r.get("Phone"), company, r,
+                          r.get("LastActivityDate") or r.get("LastModifiedDate")))
     return out
 
 
@@ -90,12 +93,13 @@ def _fetch_zoho(conn: Connection) -> list[dict]:
     host = _zoho_host(conn.credentials["dc"])
     token = conn.credentials["access_token"]
     # COQL requires a WHERE clause (unlike SQL) — "id is not null" matches every record.
-    raw = zh.query_coql(host, token, f"SELECT id, Full_Name, Email, Phone, Account_Name FROM Contacts WHERE id is not null LIMIT {_FETCH_LIMIT}")
+    raw = zh.query_coql(host, token, f"SELECT id, Full_Name, Email, Phone, Account_Name, Last_Activity_Time, Modified_Time FROM Contacts WHERE id is not null LIMIT {_FETCH_LIMIT}")
     out = []
     for r in raw:
         account_name = r.get("Account_Name")
         company = account_name.get("name") if isinstance(account_name, dict) else account_name
-        out.append(_norm("zoho", r.get("id"), r.get("Full_Name"), r.get("Email"), r.get("Phone"), company, r))
+        out.append(_norm("zoho", r.get("id"), r.get("Full_Name"), r.get("Email"), r.get("Phone"), company, r,
+                          r.get("Last_Activity_Time") or r.get("Modified_Time")))
     return out
 
 
@@ -106,7 +110,8 @@ def _fetch_outreach(conn: Connection) -> list[dict]:
     for r in raw[:_FETCH_LIMIT]:
         attrs = r.get("attributes", {})
         name = " ".join(p for p in [attrs.get("firstName"), attrs.get("lastName")] if p)
-        out.append(_norm("outreach", r.get("id"), name, attrs.get("email"), attrs.get("homePhone") or attrs.get("mobilePhone"), attrs.get("company"), r))
+        out.append(_norm("outreach", r.get("id"), name, attrs.get("email"), attrs.get("homePhone") or attrs.get("mobilePhone"), attrs.get("company"), r,
+                          attrs.get("updatedAt")))
     return out
 
 
@@ -117,7 +122,8 @@ def _fetch_salesloft(conn: Connection) -> list[dict]:
     for r in raw:
         name = " ".join(p for p in [r.get("first_name"), r.get("last_name")] if p)
         account = r.get("account") or {}
-        out.append(_norm("salesloft", r.get("id"), name, r.get("email_address"), r.get("phone"), account.get("name"), r))
+        out.append(_norm("salesloft", r.get("id"), name, r.get("email_address"), r.get("phone"), account.get("name"), r,
+                          r.get("updated_at")))
     return out
 
 
