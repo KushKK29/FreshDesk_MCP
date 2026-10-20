@@ -698,7 +698,11 @@ app.include_router(connect_oauth.router)
 app.include_router(crm_ops_page.router)
 app.include_router(ops_api.router)
 
-# The Ops UI is a separate static site. Bearer-token auth (no cookies), so
-# any origin is safe to allow; set OPS_UI_ORIGIN to lock it down in prod.
+# The Ops UI is a separate static site. Most /api/* routes are bearer-token
+# auth (no cookies), so "*" doesn't let another origin ride a victim's
+# session the way cookie-based CORS would. But unauthenticated routes
+# (signup/login) are still reachable cross-origin under "*", which is fine
+# for local dev and wrong in production — set OPS_UI_ORIGIN to the real UI
+# origin in every deployed environment (security review finding, 2026-10-21).
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 app.add_middleware(CORSMiddleware, allow_origins=[os.environ.get("OPS_UI_ORIGIN", "*")], allow_methods=["*"], allow_headers=["*"])
