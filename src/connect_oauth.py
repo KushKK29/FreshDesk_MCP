@@ -249,7 +249,7 @@ def connect_callback(provider: str, request: Request, code: str | None = Query(N
         user_id=pending["hub_user_id"], provider=provider, auth_type="oauth2",
         credentials=credentials, scopes=config["scopes"], expires_at=expires_at, dc=dc,
     )
-    ui_origin = os.environ.get("OPS_UI_ORIGIN", "*")
-    if pending.get("ui") and ui_origin != "*":
+    ui_origin = os.environ.get("OPS_UI_ORIGIN")
+    if pending.get("ui") and ui_origin and ui_origin != "*":
         return RedirectResponse(f"{ui_origin.rstrip('/')}/#/accounts", status_code=302)
     return RedirectResponse("/connected-accounts", status_code=302)
