@@ -99,16 +99,25 @@ class ToolCall(BaseModel):
     confirm_token: str | None = None
 
 
+def _confirm_gate(spec: adapters.ToolSpec, provider: str, name: str, body: "ToolCall", user_id: str) -> dict | None:
+    """None if the call may proceed; otherwise the {preview, confirm_token}
+    response to return as-is."""
+    if not spec.requires_confirm or (
+        body.confirm_token and confirm_tokens.consume(body.confirm_token, user_id, provider, name, body.args)
+    ):
+        return None
+    return {"preview": body.args, "confirm_token": confirm_tokens.issue(user_id, provider, name, body.args)}
+
+
 @router.post("/ops/tools/{name}")
 def call_tool(name: str, body: ToolCall, authorization: str | None = Header(None)):
     user = _user(authorization)
     spec = next((s for s in adapters.ADAPTERS[_PROVIDER].tools() if s.name == name), None)
     if not spec:
         raise HTTPException(404, f"unknown tool: {name}")
-    if spec.requires_confirm and not (
-        body.confirm_token and confirm_tokens.consume(body.confirm_token, user.user_id, _PROVIDER, name, body.args)
-    ):
-        return {"preview": body.args, "confirm_token": confirm_tokens.issue(user.user_id, _PROVIDER, name, body.args)}
+    gated = _confirm_gate(spec, _PROVIDER, name, body, user.user_id)
+    if gated is not None:
+        return gated
     conn = adapters.Connection(user_id=user.user_id, provider=_PROVIDER, auth_type="none", credentials={})
     try:
         return adapters.ADAPTERS[_PROVIDER].call(name, body.args, conn)
@@ -133,10 +142,9 @@ def call_crm_tool(provider: str, name: str, body: ToolCall, authorization: str |
     if not spec:
         raise HTTPException(404, f"unknown tool: {name}")
 
-    if spec.requires_confirm and not (
-        body.confirm_token and confirm_tokens.consume(body.confirm_token, user.user_id, provider, name, body.args)
-    ):
-        return {"preview": body.args, "confirm_token": confirm_tokens.issue(user.user_id, provider, name, body.args)}
+    gated = _confirm_gate(spec, provider, name, body, user.user_id)
+    if gated is not None:
+        return gated
 
     conn, err = crm_contacts.get_fresh_conn(user.user_id, provider)
     if not conn:
@@ -144,11 +152,9 @@ def call_crm_tool(provider: str, name: str, body: ToolCall, authorization: str |
 
     try:
         result = adapter.call(name, body.args, conn)
-    except TypeError as exc:
-        raise HTTPException(400, str(exc))
     except Exception as exc:
-        if not oauth_refresh.looks_like_auth_error(exc):
-            raise HTTPException(502, str(exc))
+        if isinstance(exc, TypeError) or not oauth_refresh.looks_like_auth_error(exc):
+            raise HTTPException(400 if isinstance(exc, TypeError) else 502, str(exc))
         try:
             conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
         except Exception:
@@ -156,6 +162,8 @@ def call_crm_tool(provider: str, name: str, body: ToolCall, authorization: str |
             raise HTTPException(409, f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.")
         try:
             result = adapter.call(name, body.args, conn)
+        except TypeError as retry_exc:
+            raise HTTPException(400, str(retry_exc))
         except Exception as retry_exc:
             raise HTTPException(502, str(retry_exc))
 
