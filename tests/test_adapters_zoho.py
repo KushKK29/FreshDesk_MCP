@@ -94,6 +94,37 @@ def test_query_coql_caps_an_excessive_limit():
         httpx.request = orig
 
 
+def test_get_record_rejects_id_with_path_separator_before_any_http_call():
+    called = {"n": 0}
+    orig = httpx.request
+    def fake_request(*a, **k):
+        called["n"] += 1
+        return httpx.Response(200, json={})
+    httpx.request = fake_request
+    try:
+        try:
+            adapter.call("zoho_get_lead", {"id": "123/../../Leads"}, _conn())
+            assert False, "should have raised InvalidZohoPathSegment"
+        except InvalidZohoPathSegment:
+            pass
+    finally:
+        httpx.request = orig
+    assert called["n"] == 0, "no HTTP call should have been made for a path-injecting id"
+
+
+def test_convert_lead_rejects_id_with_path_separator():
+    orig = httpx.request
+    httpx.request = lambda *a, **k: httpx.Response(200, json={})
+    try:
+        try:
+            adapter.call("zoho_convert_lead", {"lead_id": "1/actions/convert/extra"}, _conn())
+            assert False, "should have raised InvalidZohoPathSegment"
+        except InvalidZohoPathSegment:
+            pass
+    finally:
+        httpx.request = orig
+
+
 def test_get_related_records_rejects_unknown_module_before_any_http_call():
     called = {"n": 0}
     orig = httpx.request
@@ -176,6 +207,8 @@ if __name__ == "__main__":
     test_query_coql()
     test_query_coql_rejects_multi_statement_before_any_http_call()
     test_query_coql_caps_an_excessive_limit()
+    test_get_record_rejects_id_with_path_separator_before_any_http_call()
+    test_convert_lead_rejects_id_with_path_separator()
     test_get_related_records_rejects_unknown_module_before_any_http_call()
     test_get_related_records_rejects_related_list_with_path_separator()
     test_get_related_records_accepts_known_module_and_related_list()

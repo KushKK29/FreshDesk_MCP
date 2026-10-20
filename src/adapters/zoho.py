@@ -45,6 +45,19 @@ def _resolve_host(dc: str) -> str:
 
 
 _RELATED_LIST_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")  # Zoho record ids are always numeric, but err permissive-but-path-safe rather than assume the exact format
+
+
+def _validate_record_id(record_id: str) -> str:
+    """Every record/lead id below is interpolated straight into
+    zoho_client.py's f-string URL paths (f"/{module}/{record_id}"). Follow-up
+    to _validate_module above (automated security review, 2026-10-21): the
+    `id`/`lead_id` args had the exact same path-injection shape as `module`
+    did — a caller could set id to "123/some/other/path" and reach an
+    unintended endpoint. Blocks "/" and any other path-breaking character."""
+    if not _RECORD_ID_RE.match(record_id):
+        raise InvalidZohoPathSegment(f"invalid record id: {record_id!r}")
+    return record_id
 
 
 def _validate_module(module: str) -> str:
@@ -189,10 +202,10 @@ class ZohoAdapter:
         if tool == "zoho_upsert_record":
             return zh.upsert_record(host, token, _validate_module(args["module"]), args["data"])
         if tool == "zoho_convert_lead":
-            return zh.convert_lead(host, token, args["lead_id"])
+            return zh.convert_lead(host, token, _validate_record_id(args["lead_id"]))
         if tool == "zoho_get_related_records":
             return {"records": zh.get_related_records(
-                host, token, _validate_module(args["module"]), args["id"], _validate_related_list(args["related_list"]),
+                host, token, _validate_module(args["module"]), _validate_record_id(args["id"]), _validate_related_list(args["related_list"]),
             )}
         if tool == "zoho_mass_convert_leads":
             return zh.mass_convert_leads(host, token, args["lead_ids"])
@@ -205,13 +218,13 @@ class ZohoAdapter:
             if tool == _list_tool_name(obj):
                 return {"records": zh.list_records(host, token, module)}
             if tool == f"zoho_get_{obj}":
-                return zh.get_record(host, token, module, args["id"])
+                return zh.get_record(host, token, module, _validate_record_id(args["id"]))
             if tool == f"zoho_create_{obj}":
                 return zh.create_record(host, token, module, args["data"])
             if tool == f"zoho_update_{obj}":
-                return zh.update_record(host, token, module, args["id"], args["data"])
+                return zh.update_record(host, token, module, _validate_record_id(args["id"]), args["data"])
             if tool == f"zoho_delete_{obj}":
-                zh.delete_record(host, token, module, args["id"])
+                zh.delete_record(host, token, module, _validate_record_id(args["id"]))
                 return {"status": "deleted"}
 
         raise ValueError(f"unknown tool: {tool}")
