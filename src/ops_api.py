@@ -20,7 +20,9 @@ try:
     import connect_oauth
     import connected_accounts as accts
     import connections
+    import crm_contacts
     import crm_ops
+    import oauth_refresh
     import support_ops
     from adapters.freshdesk import validate_freshdesk_domain
     from oauth_server import BASE_URL
@@ -31,7 +33,9 @@ except ImportError:
     from src import connect_oauth
     from src import connected_accounts as accts
     from src import connections
+    from src import crm_contacts
     from src import crm_ops
+    from src import oauth_refresh
     from src import support_ops
     from src.adapters.freshdesk import validate_freshdesk_domain
     from src.oauth_server import BASE_URL
@@ -112,6 +116,51 @@ def call_tool(name: str, body: ToolCall, authorization: str | None = Header(None
         raise HTTPException(400, str(exc))
     except Exception as exc:
         raise HTTPException(502, str(exc))
+
+
+@router.post("/ops/crm-tools/{provider}/{name}")
+def call_crm_tool(provider: str, name: str, body: ToolCall, authorization: str | None = Header(None)):
+    """Same preview/confirm-token + proactive/reactive-refresh dispatch as
+    mcp_http_server.py's _call_tool_for_current_caller, for the bearer-session
+    Ops UI: call_tool above only reaches support_ops/crm_ops (no credentials
+    of their own); this is the UI's way to call a connected CRM's own write
+    tool (e.g. salesforce_update_contact), which needs a real, fresh token."""
+    user = _user(authorization)
+    adapter = adapters.ADAPTERS.get(provider)
+    if not adapter:
+        raise HTTPException(404, f"unknown provider: {provider}")
+    spec = next((s for s in adapter.tools() if s.name == name), None)
+    if not spec:
+        raise HTTPException(404, f"unknown tool: {name}")
+
+    if spec.requires_confirm and not (
+        body.confirm_token and confirm_tokens.consume(body.confirm_token, user.user_id, provider, name, body.args)
+    ):
+        return {"preview": body.args, "confirm_token": confirm_tokens.issue(user.user_id, provider, name, body.args)}
+
+    conn, err = crm_contacts.get_fresh_conn(user.user_id, provider)
+    if not conn:
+        raise HTTPException(409, err or f"{provider} is not connected")
+
+    try:
+        result = adapter.call(name, body.args, conn)
+    except TypeError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        if not oauth_refresh.looks_like_auth_error(exc):
+            raise HTTPException(502, str(exc))
+        try:
+            conn = oauth_refresh.refresh_and_persist(adapter, conn, provider)
+        except Exception:
+            connections.mark_needs_reauth(user.user_id, provider)
+            raise HTTPException(409, f"{provider} session expired and could not be refreshed — reconnect it from Connected accounts.")
+        try:
+            result = adapter.call(name, body.args, conn)
+        except Exception as retry_exc:
+            raise HTTPException(502, str(retry_exc))
+
+    connections.touch_last_used(user.user_id, provider)
+    return result
 
 
 class DigestSettings(BaseModel):
