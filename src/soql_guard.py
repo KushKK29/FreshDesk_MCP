@@ -11,14 +11,13 @@ Needs its own security review before shipping (PRD §9, and this plan's Task
 13) given full-parity scope now includes write tools alongside this read
 path — flagged, not self-approved.
 """
-import re
+try:
+    import sql_like_guard
+except ImportError:
+    from src import sql_like_guard
 
-_DML_KEYWORDS = re.compile(r"\b(INSERT|UPDATE|DELETE|UPSERT|MERGE|UNDELETE)\b", re.IGNORECASE)
-_MULTI_STATEMENT = re.compile(r";")
-_SELECT_PREFIX = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
-_LIMIT_CLAUSE = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
-_DEFAULT_LIMIT = 200
-_MAX_LIMIT = 2000
+_DEFAULT_LIMIT = sql_like_guard.DEFAULT_LIMIT
+_MAX_LIMIT = sql_like_guard.MAX_LIMIT
 
 
 class SoqlRejected(Exception):
@@ -28,20 +27,7 @@ class SoqlRejected(Exception):
 def validate_and_cap(soql: str) -> str:
     """Raises SoqlRejected if the query isn't a plain SELECT, or contains DML
     keywords or statement separators. Appends or caps LIMIT otherwise."""
-    if _MULTI_STATEMENT.search(soql):
-        raise SoqlRejected("multi-statement SOQL is not allowed")
-    if not _SELECT_PREFIX.match(soql):
-        raise SoqlRejected("only SELECT queries are allowed")
-    if _DML_KEYWORDS.search(soql):
-        raise SoqlRejected("DML keywords are not allowed in this tool")
-
-    existing_limit = _LIMIT_CLAUSE.search(soql)
-    if existing_limit:
-        limit_value = int(existing_limit.group(1))
-        if limit_value > _MAX_LIMIT:
-            return _LIMIT_CLAUSE.sub(f"LIMIT {_MAX_LIMIT}", soql)
-        return soql
-    return f"{soql.rstrip().rstrip(';')} LIMIT {_DEFAULT_LIMIT}"
+    return sql_like_guard.validate_and_cap(soql, SoqlRejected, check_dml=True)
 
 
 def _demo():

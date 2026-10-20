@@ -12,13 +12,13 @@ data scoped to the connected user's own tenant and permissions.
 Security review finding, 2026-10-21: zoho_query_coql had no local
 validation at all, unlike salesforce_query_soql's soql_guard.py.
 """
-import re
+try:
+    import sql_like_guard
+except ImportError:
+    from src import sql_like_guard
 
-_MULTI_STATEMENT = re.compile(r";")
-_SELECT_PREFIX = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
-_LIMIT_CLAUSE = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
-_DEFAULT_LIMIT = 200
-_MAX_LIMIT = 2000
+_DEFAULT_LIMIT = sql_like_guard.DEFAULT_LIMIT
+_MAX_LIMIT = sql_like_guard.MAX_LIMIT
 
 
 class CoqlRejected(Exception):
@@ -28,18 +28,7 @@ class CoqlRejected(Exception):
 def validate_and_cap(coql: str) -> str:
     """Raises CoqlRejected if the query isn't a plain SELECT, or contains a
     statement separator. Appends or caps LIMIT otherwise."""
-    if _MULTI_STATEMENT.search(coql):
-        raise CoqlRejected("multi-statement COQL is not allowed")
-    if not _SELECT_PREFIX.match(coql):
-        raise CoqlRejected("only SELECT queries are allowed")
-
-    existing_limit = _LIMIT_CLAUSE.search(coql)
-    if existing_limit:
-        limit_value = int(existing_limit.group(1))
-        if limit_value > _MAX_LIMIT:
-            return _LIMIT_CLAUSE.sub(f"LIMIT {_MAX_LIMIT}", coql)
-        return coql
-    return f"{coql.rstrip().rstrip(';')} LIMIT {_DEFAULT_LIMIT}"
+    return sql_like_guard.validate_and_cap(coql, CoqlRejected, check_dml=False)
 
 
 def _demo():
