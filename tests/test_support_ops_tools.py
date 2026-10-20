@@ -87,3 +87,10 @@ def test_confirm_gated_tools_are_marked():
     gated = {s.name for s in so.SupportOpsAdapter().tools() if s.requires_confirm}
     assert gated == {"support_ops_pause_collisions", "support_ops_ticket_to_task",
                      "support_ops_sync_completed_tasks", "support_ops_create_missing_contacts"}
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("all checks passed")

@@ -113,6 +113,40 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+def authorize_url(provider: str, config: dict, client_id: str, user_id: str, ui: bool = False) -> str:
+    """Records a pending connect and returns the provider's authorize URL.
+    ui=True marks a flow started from the standalone Ops UI by bearer token:
+    its callback lands on this backend with no hub cookie, so the callback
+    skips the cookie check for it (the single-use state is still bound to
+    the starting user_id)."""
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = _pkce_pair() if config["pkce"] else (None, None)
+    redirect_uri = f"{BASE_URL}/connect/{provider}/callback"
+
+    _pending_connects.insert_one({
+        "state": state,
+        "provider": provider,
+        "hub_user_id": user_id,
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "created_at": time.time(),
+        "ui": ui,
+    })
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "state": state,
+        "scope": " ".join(config["scopes"]),
+    }
+    if config["pkce"]:
+        params["code_challenge"] = challenge
+        params["code_challenge_method"] = "S256"
+    params.update(config.get("extra_authorize_params", {}))
+    return f"{config['authorize_url']}?{urlencode(params)}"
+
+
 @router.get("/connect/{provider}/start")
 def connect_start(provider: str, request: Request):
     user = auth.resolve_session(request.cookies.get(SESSION_COOKIE_NAME))
@@ -127,31 +161,7 @@ def connect_start(provider: str, request: Request):
     if not client_id:
         return HTMLResponse(_error_page("Provider not configured", f"{provider} OAuth app is not registered yet ({config['client_id_env']} is unset). Register an app and set the env var first."), status_code=503)
 
-    state = secrets.token_urlsafe(24)
-    verifier, challenge = _pkce_pair() if config["pkce"] else (None, None)
-    redirect_uri = f"{BASE_URL}/connect/{provider}/callback"
-
-    _pending_connects.insert_one({
-        "state": state,
-        "provider": provider,
-        "hub_user_id": user.user_id,
-        "code_verifier": verifier,
-        "redirect_uri": redirect_uri,
-        "created_at": time.time(),
-    })
-
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "state": state,
-        "scope": " ".join(config["scopes"]),
-    }
-    if config["pkce"]:
-        params["code_challenge"] = challenge
-        params["code_challenge_method"] = "S256"
-    params.update(config.get("extra_authorize_params", {}))
-    return RedirectResponse(f"{config['authorize_url']}?{urlencode(params)}", status_code=302)
+    return RedirectResponse(authorize_url(provider, config, client_id, user.user_id), status_code=302)
 
 
 @router.get("/connect/{provider}/callback")
@@ -173,7 +183,7 @@ def connect_callback(provider: str, request: Request, code: str | None = Query(N
     # account linked to it. The callback must be completed by the SAME hub
     # session that started it, not just hold a valid state.
     user = auth.resolve_session(request.cookies.get(SESSION_COOKIE_NAME))
-    if not user or user.user_id != pending["hub_user_id"]:
+    if not pending.get("ui") and (not user or user.user_id != pending["hub_user_id"]):
         return HTMLResponse(_error_page("Invalid connection attempt", "This connection must be completed in the same browser session that started it. Start again from Connected accounts."), status_code=403)
 
     config = PROVIDER_OAUTH_CONFIG[provider]
@@ -239,4 +249,7 @@ def connect_callback(provider: str, request: Request, code: str | None = Query(N
         user_id=pending["hub_user_id"], provider=provider, auth_type="oauth2",
         credentials=credentials, scopes=config["scopes"], expires_at=expires_at, dc=dc,
     )
+    ui_origin = os.environ.get("OPS_UI_ORIGIN", "*")
+    if pending.get("ui") and ui_origin != "*":
+        return RedirectResponse(f"{ui_origin.rstrip('/')}/#/accounts", status_code=302)
     return RedirectResponse("/connected-accounts", status_code=302)
