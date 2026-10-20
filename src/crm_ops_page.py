@@ -106,7 +106,7 @@ def _duplicates_body(user_id: str) -> str:
         if g["conflicting_fields"]:
             conflict_lines = ", ".join(f"{field} differs" for field in g["conflicting_fields"])
             conflicts_html = f'<div class="dup-conflict">⚠ {html.escape(conflict_lines)}</div>'
-        groups_html.append(f'<div class="dup-group"><div class="dup-email">{html.escape(g["email"])}</div>{members_html}{conflicts_html}</div>')
+        groups_html.append(f'<div class="dup-group"><div class="dup-email">{html.escape(g["group_key"])}</div>{members_html}{conflicts_html}</div>')
     return header + "".join(groups_html)
 
 

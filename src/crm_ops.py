@@ -46,13 +46,18 @@ def _build_groups(by_provider: dict[str, list[dict]]) -> dict[str, list[dict]]:
 
 
 def _group_result(key: str, members: list[dict], confidence: str = "exact") -> dict:
+    """`key` is a real email address for an exact-match group (find_duplicates),
+    but for a fuzzy-match group (find_duplicates_fuzzy) it's the matched name —
+    cluster members there were, by construction, NOT matched on email, so no
+    single shared email exists. Exposed as "group_key", not "email", so a
+    caller can't mistake a fuzzy group's name for an address."""
     conflicts = {}
     for field in ("name", "phone", "company"):
         values = {m[field] for m in members if m[field]}
         if len(values) > 1:
             conflicts[field] = {m["provider"]: m[field] for m in members if m[field]}
     return {
-        "email": key,
+        "group_key": key,
         "members": [{"provider": m["provider"], "id": m["id"], "name": m["name"], "company": m["company"]} for m in members],
         "conflicting_fields": conflicts,
         "recommended_primary": max(members, key=lambda m: sum(1 for f in ("name", "phone", "company") if m[f]))["provider"],
