@@ -30,8 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 os.environ.setdefault("FRESHDESK_DOMAIN", "test.freshdesk.com")
 os.environ.setdefault("FRESHDESK_API_KEY", "fake_key")
 os.environ["MONGO_URI"] = "mongodb://localhost:27017"
-TEST_PORT = 8099
-os.environ["OAUTH_BASE_URL"] = f"http://localhost:{TEST_PORT}"
+os.environ.setdefault("OAUTH_BASE_URL", "http://localhost:8099")
 os.environ.setdefault("VAULT_MASTER_KEY", "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=")
 
 try:
@@ -48,24 +47,45 @@ if MONGO_AVAILABLE:
     import connections
     import mcp_http_server as mhs
 
-    svr._db = _dbmod._mongo["test_freshdesk_connector_protocol_e2e"]
-    svr._clients = svr._db["oauth_clients"]
-    svr._grants = svr._db["oauth_grants"]
-    svr._pending_authorizations = svr._db["pending_authorizations"]
-    hub_auth._db = svr._db
-    hub_auth._users = hub_auth._db["users"]
-    hub_auth._login_sessions = hub_auth._db["login_sessions"]
-    hub_auth._users.create_index("email", unique=True)
-    hub_auth._login_sessions.create_index("expires_at", expireAfterSeconds=0)
-    connections._db = svr._db
-    connections._connections = connections._db["connections"]
-    connections._connections.create_index([("user_id", 1), ("provider", 1)], unique=True)
-    mhs._grants = svr._grants
+    # mhs.app's TransportSecuritySettings.allowed_hosts was already baked
+    # in from svr.BASE_URL at mcp_http_server.py's import time — whichever
+    # test file triggers that import first in the collection order "wins",
+    # same class of bug as _rebind_globals below. os.environ["OAUTH_BASE_URL"]
+    # set above only takes effect if this file is that first import, so the
+    # real uvicorn server here must listen on whatever port actually got
+    # baked in, not on a port this file assumed it controlled.
+    TEST_PORT = int(svr.BASE_URL.rsplit(":", 1)[-1])
+
+    def _rebind_globals():
+        # See test_mcp_http_server.py's _rebind_globals for why this needs
+        # to be a function called from _reset_db(), not top-level code:
+        # pytest imports every test file during collection before running
+        # any test body, and every Mongo-backed test file here repoints
+        # these same shared module globals — whichever file imports last
+        # wins at import time, silently pointing every earlier file at ITS
+        # database (and, in this file's case, the real uvicorn server
+        # below reads auth state through these same module handles too).
+        svr._db = _dbmod._mongo["test_freshdesk_connector_protocol_e2e"]
+        svr._clients = svr._db["oauth_clients"]
+        svr._grants = svr._db["oauth_grants"]
+        svr._pending_authorizations = svr._db["pending_authorizations"]
+        hub_auth._db = svr._db
+        hub_auth._users = hub_auth._db["users"]
+        hub_auth._login_sessions = hub_auth._db["login_sessions"]
+        hub_auth._users.create_index("email", unique=True)
+        hub_auth._login_sessions.create_index("expires_at", expireAfterSeconds=0)
+        connections._db = svr._db
+        connections._connections = connections._db["connections"]
+        connections._connections.create_index([("user_id", 1), ("provider", 1)], unique=True)
+        mhs._grants = svr._grants
+
+    _rebind_globals()
 
     from fastapi.testclient import TestClient
 
 
 def _reset_db():
+    _rebind_globals()
     svr._clients.delete_many({})
     svr._grants.delete_many({})
     svr._pending_authorizations.delete_many({})

@@ -26,21 +26,32 @@ if MONGO_AVAILABLE:
                                  # importing login_pages directly here first would recreate that circular import.
     import auth as a
     import login_pages as lp
-    a._db = _dbmod._mongo["test_freshdesk_connector_login_pages"]
-    a._users = a._db["users"]
-    a._login_sessions = a._db["login_sessions"]
-    a._users.create_index("email", unique=True)
-    a._login_sessions.create_index("expires_at", expireAfterSeconds=0)
+
+    def _rebind_globals():
+        # See test_mcp_http_server.py's _rebind_globals for why this is a
+        # function called from _reset_db(), not top-level code: pytest
+        # imports every test file during collection before running any
+        # test body, and every Mongo-backed test file here repoints these
+        # same shared module globals — whichever file imports last wins at
+        # import time, silently pointing every earlier file at ITS database.
+        a._db = _dbmod._mongo["test_freshdesk_connector_login_pages"]
+        a._users = a._db["users"]
+        a._login_sessions = a._db["login_sessions"]
+        a._users.create_index("email", unique=True)
+        a._login_sessions.create_index("expires_at", expireAfterSeconds=0)
+        svr._db = a._db
+        svr._clients = svr._db["oauth_clients"]
+        svr._grants = svr._db["oauth_grants"]
+        svr._pending_authorizations = svr._db["pending_authorizations"]
+
+    _rebind_globals()
 
     from fastapi.testclient import TestClient
-    svr._db = a._db
-    svr._clients = svr._db["oauth_clients"]
-    svr._grants = svr._db["oauth_grants"]
-    svr._pending_authorizations = svr._db["pending_authorizations"]
     client = TestClient(svr.app)
 
 
 def _reset_db():
+    _rebind_globals()
     a._users.delete_many({})
     a._login_sessions.delete_many({})
 

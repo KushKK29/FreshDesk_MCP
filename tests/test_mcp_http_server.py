@@ -36,31 +36,41 @@ if MONGO_AVAILABLE:
     import confirm_tokens
     import mcp_http_server as mhs
 
-    svr._db = _dbmod._mongo["test_freshdesk_connector_mcp"]
-    svr._clients = svr._db["oauth_clients"]
-    svr._grants = svr._db["oauth_grants"]
-    svr._pending_authorizations = svr._db["pending_authorizations"]
-    hub_auth._db = svr._db
-    hub_auth._users = hub_auth._db["users"]
-    hub_auth._login_sessions = hub_auth._db["login_sessions"]
-    hub_auth._users.create_index("email", unique=True)
-    hub_auth._login_sessions.create_index("expires_at", expireAfterSeconds=0)
-    connections._db = svr._db
-    connections._connections = connections._db["connections"]
-    connections._connections.create_index([("user_id", 1), ("provider", 1)], unique=True)
-    confirm_tokens._confirm_tokens = svr._db["confirm_tokens"]
-    confirm_tokens._confirm_tokens.create_index("expires_at", expireAfterSeconds=0)
-    mhs.confirm_tokens = confirm_tokens
-    # mhs imported oauth_server's _grants before the redirect above happened
-    # at module-import time elsewhere in the suite — re-point it explicitly
-    # so this test file is self-contained regardless of import order.
-    mhs._grants = svr._grants
+    def _rebind_globals():
+        # Every test file in this suite that touches Mongo repoints these
+        # same shared module globals (oauth_server/auth/connections/
+        # confirm_tokens/mcp_http_server all cache module-level handles).
+        # pytest imports every test file during collection, before running
+        # any test body, so whichever file is imported last (alphabetically)
+        # would otherwise leave every earlier file silently pointed at ITS
+        # database. Re-binding here and calling it from _reset_db() (which
+        # every test here already calls first) makes this file's tests
+        # correct regardless of what any other test file's import did.
+        svr._db = _dbmod._mongo["test_freshdesk_connector_mcp"]
+        svr._clients = svr._db["oauth_clients"]
+        svr._grants = svr._db["oauth_grants"]
+        svr._pending_authorizations = svr._db["pending_authorizations"]
+        hub_auth._db = svr._db
+        hub_auth._users = hub_auth._db["users"]
+        hub_auth._login_sessions = hub_auth._db["login_sessions"]
+        hub_auth._users.create_index("email", unique=True)
+        hub_auth._login_sessions.create_index("expires_at", expireAfterSeconds=0)
+        connections._db = svr._db
+        connections._connections = connections._db["connections"]
+        connections._connections.create_index([("user_id", 1), ("provider", 1)], unique=True)
+        confirm_tokens._confirm_tokens = svr._db["confirm_tokens"]
+        confirm_tokens._confirm_tokens.create_index("expires_at", expireAfterSeconds=0)
+        mhs.confirm_tokens = confirm_tokens
+        mhs._grants = svr._grants
+
+    _rebind_globals()
 
     from fastapi.testclient import TestClient
     client = TestClient(svr.app)
 
 
 def _reset_db():
+    _rebind_globals()
     svr._clients.delete_many({})
     svr._grants.delete_many({})
     svr._pending_authorizations.delete_many({})
