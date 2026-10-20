@@ -127,20 +127,25 @@ def find_duplicates_fuzzy(user_id: str) -> dict:
         if a_key in used:
             continue
         cluster = [a]
+        seen_providers = {a["provider"]}
         for b in remaining[i + 1:]:
             b_key = (b["provider"], b["id"])
-            if b_key in used or b["provider"] == a["provider"] or not _name_match(a["name"], b["name"]):
+            if b_key in used or b["provider"] in seen_providers:
                 continue
-            if _phone_match(a["phone"], b["phone"]):
+            # Match against any member already in the cluster, not just the seed —
+            # otherwise a valid three-way chain (A~B, B~C, but A and C too far
+            # apart to match directly) silently drops C.
+            m = next((m for m in cluster if _name_match(m["name"], b["name"])), None)
+            if not m:
+                continue
+            if _phone_match(m["phone"], b["phone"]) or (m["company"] and m["company"] == b["company"]):
                 cluster.append(b)
                 used.add(b_key)
-            elif a["company"] and a["company"] == b["company"]:
-                cluster.append(b)
-                used.add(b_key)
+                seen_providers.add(b["provider"])
         if len(cluster) < 2:
             continue
         used.add(a_key)
-        confidence = "high" if any(_phone_match(a["phone"], m["phone"]) for m in cluster[1:]) else "medium"
+        confidence = "high" if any(_phone_match(x["phone"], y["phone"]) for x in cluster for y in cluster if x is not y) else "medium"
         fuzzy_groups.append(_group_result(a["name"].lower(), cluster, confidence))
 
     all_groups = exact_duplicate_groups + fuzzy_groups
@@ -190,27 +195,25 @@ def field_conflicts_with_suggestion(user_id: str) -> dict:
         providers_seen = {m["provider"] for m in members}
         if len(providers_seen) < 2:
             continue
+        base = _group_result(key, members, "exact")
+        if not base["conflicting_fields"]:
+            continue
         conflicts = {}
-        for field in ("name", "phone", "company"):
-            values = {m[field] for m in members if m[field]}
-            if len(values) <= 1:
-                continue
-            per_provider = {m["provider"]: m[field] for m in members if m[field]}
+        for field, per_provider in base["conflicting_fields"].items():
             dated = [(m["provider"], m[field], _parse_ts(m["last_activity"])) for m in members if m[field]]
             with_ts = [d for d in dated if d[2] is not None]
-            suggested = max(with_ts, key=lambda d: d[2])[1] if with_ts else None
+            newest = max(with_ts, key=lambda d: d[2]) if with_ts else None
             conflicts[field] = {
                 "values": per_provider,
-                "suggested_value": suggested,
-                "suggested_from": max(with_ts, key=lambda d: d[2])[0] if with_ts else None,
-                "basis": "most_recent_activity" if with_ts else "no_timestamp_available",
+                "suggested_value": newest[1] if newest else None,
+                "suggested_from": newest[0] if newest else None,
+                "basis": "most_recent_activity" if newest else "no_timestamp_available",
             }
-        if conflicts:
-            conflict_groups.append({
-                "email": key,
-                "members": [{"provider": m["provider"], "id": m["id"], "name": m["name"], "company": m["company"]} for m in members],
-                "conflicting_fields": conflicts,
-            })
+        conflict_groups.append({
+            "email": key,
+            "members": base["members"],
+            "conflicting_fields": conflicts,
+        })
 
     return {
         "providers_checked": list(by_provider.keys()),
@@ -341,7 +344,23 @@ def stale_contact_finder(user_id: str, days: int = 90) -> dict:
     deals_by_provider, deal_errors = fetch_all_deals(user_id)
     fetch_errors = {**fetch_errors, **{f"deals:{k}": v for k, v in deal_errors.items()}}
 
-    open_accounts = {d["account"].strip().lower() for rows in deals_by_provider.values() for d in rows if not d["is_closed"] and d["account"]}
+    # HubSpot deals carry no company inline (crm_contacts.py's own docstring) —
+    # resolve via the deal's associated contact_ids, same as support_ops.py's _load.
+    contact_by_id = {(c["provider"], c["id"]): c for rows in by_provider.values() for c in rows}
+    open_accounts: set[str] = set()
+    for provider, rows in deals_by_provider.items():
+        for d in rows:
+            if d["is_closed"]:
+                continue
+            account = d["account"]
+            if not account:
+                for cid in d["contact_ids"]:
+                    c = contact_by_id.get((provider, cid))
+                    if c and c["company"]:
+                        account = c["company"]
+                        break
+            if account:
+                open_accounts.add(account.strip().lower())
     ticket_emails = _freshdesk_requester_emails(user_id)
     now = datetime.now(timezone.utc)
     cutoff_days = max(days, 0)
