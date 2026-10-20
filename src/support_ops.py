@@ -624,6 +624,51 @@ def stale_deal_vs_open_ticket(user_id: str, days: int = 14) -> dict:
     return {"days": days, "stuck_deals": stuck, "providers_skipped": ctx["skipped"]}
 
 
+def customer_followup_gap_detector(user_id: str, days: int = 7) -> dict:
+    """Open tickets and open deals that nobody has touched in `days` days —
+    a single review queue for things slipping through, across support and
+    sales. Ticket freshness is Freshdesk's own updated_at (bumped by any
+    agent or requester reply, or a status change); deal freshness is the
+    CRM's own last_activity. Distinct from stale_deal_vs_open_ticket, which
+    cross-references deals against *tickets on the same account* — this one
+    flags each side on its own idle clock, tickets and deals both."""
+    ctx = _load(user_id, deals=True)
+    if "error" in ctx:
+        return ctx
+    now = ctx["now"]
+
+    stale_tickets = []
+    for t in ctx["tickets"]:
+        if not _open(t):
+            continue
+        updated = _parse(t.get("updated_at"))
+        if updated and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        idle = round(_hours(now, updated) / 24, 1) if updated else None
+        if idle is None or idle >= days:
+            stale_tickets.append({**_brief(t, now), "idle_days": idle})
+
+    stale_deals = []
+    for d in ctx["deals"]:
+        if d["is_closed"]:
+            continue
+        last = _parse(d["last_activity"]) if d["last_activity"] else None
+        if last and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        idle = round(_hours(now, last) / 24, 1) if last else None
+        if idle is None or idle >= days:
+            stale_deals.append({**_deal_brief(d), "idle_days": idle})
+
+    stale_tickets.sort(key=lambda t: -(t["idle_days"] if t["idle_days"] is not None else 1e9))
+    stale_deals.sort(key=lambda d: -(d["idle_days"] if d["idle_days"] is not None else 1e9))
+    return {
+        "days": days,
+        "stale_tickets": stale_tickets,
+        "stale_deals": stale_deals,
+        "providers_skipped": ctx["skipped"],
+    }
+
+
 # 10 ── daily_digest_scheduler ──────────────────────────────────────────────
 # Scheduler = Vercel cron hitting /api/cron/digest (see ops_api.py). State =
 # one fingerprint per user in `ops_digests`. Channel = an Asana task in the
@@ -737,6 +782,9 @@ _NEW_TOOLS = [
      "Open CRM deals idle for N days (default 14) whose account also has unresolved tickets.", _obj({"days": {"type": "integer"}}), False),
     ("support_ops_daily_digest", daily_digest,
      "SLA, collision and churn digest, with whether it changed since the last scheduled run.", _obj(), False),
+    ("support_ops_customer_followup_gap_detector", customer_followup_gap_detector,
+     "Open tickets and open CRM deals with no activity in N days (default 7) — a combined review queue for support and sales follow-up gaps.",
+     _obj({"days": {"type": "integer"}}), False),
 ]
 _FNS = {name: fn for name, fn, *_ in _NEW_TOOLS}
 

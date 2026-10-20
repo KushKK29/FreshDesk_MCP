@@ -19,8 +19,9 @@ def iso(days: float) -> str:
     return (NOW + timedelta(days=days)).isoformat()
 
 
-def ticket(i, subject, email="a@x.com", company="Acme", status=2, priority=1, due=1, **stats):
+def ticket(i, subject, email="a@x.com", company="Acme", status=2, priority=1, due=1, updated=None, **stats):
     return {"id": i, "subject": subject, "status": status, "priority": priority, "due_by": iso(due),
+            "updated_at": iso(updated) if updated is not None else None,
             "stats": stats, "_email": email, "_name": "", "_company": company, "created_at": iso(-1)}
 
 
@@ -81,6 +82,18 @@ def test_unlinked_requesters_and_load_by_segment():
     seg = so.support_load_by_segment("u", "company")["segments"]
     assert {s["segment"]: s["tickets"] for s in seg} == {"Acme": 1, "(no CRM company)": 2}
     assert "error" in so.support_load_by_segment("u", "bogus")
+
+
+def test_followup_gap_flags_idle_open_items_only():
+    stub(0, ctx(
+        [ticket(1, "stale open", updated=-10), ticket(2, "fresh open", updated=-1),
+         ticket(3, "stale but closed", status=5, updated=-10), ticket(4, "no updated_at ever")],
+        deals=[deal("acme", last=-10), deal("beta", last=-1), deal("gamma", last=-10, closed=True)],
+    ))
+    out = so.customer_followup_gap_detector("u", days=7)
+    stale_ids = {t["ticket_id"] for t in out["stale_tickets"]}
+    assert stale_ids == {1, 4}
+    assert {d["account"] for d in out["stale_deals"]} == {"acme"}
 
 
 def test_confirm_gated_tools_are_marked():
