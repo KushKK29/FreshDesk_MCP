@@ -227,3 +227,8 @@ def crm_ops_quality(authorization: str | None = Header(None)):
 @router.get("/crm-ops/360")
 def crm_ops_360(email: str, authorization: str | None = Header(None)):
     return crm_ops.customer_360(_user(authorization).user_id, email)
+
+
+@router.get("/crm-ops/search")
+def crm_ops_search(q: str, authorization: str | None = Header(None)):
+    return crm_ops.customer_search(_user(authorization).user_id, q)

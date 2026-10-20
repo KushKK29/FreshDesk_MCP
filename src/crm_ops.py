@@ -137,6 +137,35 @@ def customer_360(user_id: str, email: str) -> dict:
     }
 
 
+def customer_search(user_id: str, query: str) -> dict:
+    """Customer 360, but by substring match on name/email/company instead of
+    exact email only — for the hub UI's search box. Not exposed as an MCP
+    tool (crm_ops_customer_360 keeps its narrower, agent-facing email-only
+    contract); this is JSON-API only, via ops_api.py."""
+    query = query.strip().lower()
+    by_provider, fetch_errors = fetch_all_contacts(user_id)
+    matches = []
+    for provider, contacts in by_provider.items():
+        for c in contacts:
+            haystack = " ".join(filter(None, [c["name"], c["email"], c["company"]])).lower()
+            if query in haystack:
+                matches.append({
+                    "provider": provider,
+                    "id": c["id"],
+                    "name": c["name"],
+                    "email": c["email"],
+                    "phone": c["phone"],
+                    "company": c["company"],
+                })
+    return {
+        "query": query,
+        "providers_checked": list(by_provider.keys()),
+        "providers_skipped": fetch_errors,
+        "found_in": sorted({m["provider"] for m in matches}),
+        "records": matches,
+    }
+
+
 class CrmOpsAdapter:
     key = "crm_ops"
     display_name = "CRM Ops"
