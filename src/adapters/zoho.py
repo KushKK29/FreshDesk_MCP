@@ -8,10 +8,14 @@ from a fixed allowlist of Zoho's known DCs, taken from the connection's
 stored `dc` field (set at OAuth connect time from Zoho's own response) —
 never interpolated from user input.
 """
+import re
+
 try:
+    import coql_guard
     import zoho_client as zh
     from adapters import AuthMode, Connection, ToolSpec, register
 except ImportError:
+    from src import coql_guard
     from src import zoho_client as zh
     from src.adapters import AuthMode, Connection, ToolSpec, register
 
@@ -29,11 +33,39 @@ class UnknownDataCenter(Exception):
     pass
 
 
+class InvalidZohoPathSegment(Exception):
+    pass
+
+
 def _resolve_host(dc: str) -> str:
     host = _DC_HOSTS.get(dc)
     if not host:
         raise UnknownDataCenter(f"unknown Zoho data center: {dc!r}")
     return host
+
+
+_RELATED_LIST_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _validate_module(module: str) -> str:
+    """zoho_upsert_record/get_related_records/bulk_read/bulk_write take a
+    free-text `module` string interpolated straight into zoho_client.py's
+    f-string URL paths (e.g. f"/{module}"), unlike the fixed-CRUD tools
+    which map through _MODULES. Security review finding, 2026-10-21: an
+    agent/prompt-injected caller could set module to something like
+    "Leads/123/actions/convert", reaching Zoho API paths this tool was
+    never meant to expose — still scoped to the connected user's own
+    token/tenant, but scope creep beyond the documented CRUD surface.
+    Restrict to the same known-good modules the CRUD tools already use."""
+    if module not in _MODULES.values():
+        raise InvalidZohoPathSegment(f"unknown Zoho module: {module!r}")
+    return module
+
+
+def _validate_related_list(related_list: str) -> str:
+    if not _RELATED_LIST_RE.match(related_list):
+        raise InvalidZohoPathSegment(f"invalid related_list: {related_list!r}")
+    return related_list
 
 
 _MODULES = {
@@ -153,19 +185,21 @@ class ZohoAdapter:
         token = conn.credentials["access_token"]
 
         if tool == "zoho_query_coql":
-            return {"records": zh.query_coql(host, token, args["select_query"])}
+            return {"records": zh.query_coql(host, token, coql_guard.validate_and_cap(args["select_query"]))}
         if tool == "zoho_upsert_record":
-            return zh.upsert_record(host, token, args["module"], args["data"])
+            return zh.upsert_record(host, token, _validate_module(args["module"]), args["data"])
         if tool == "zoho_convert_lead":
             return zh.convert_lead(host, token, args["lead_id"])
         if tool == "zoho_get_related_records":
-            return {"records": zh.get_related_records(host, token, args["module"], args["id"], args["related_list"])}
+            return {"records": zh.get_related_records(
+                host, token, _validate_module(args["module"]), args["id"], _validate_related_list(args["related_list"]),
+            )}
         if tool == "zoho_mass_convert_leads":
             return zh.mass_convert_leads(host, token, args["lead_ids"])
         if tool == "zoho_bulk_read":
-            return zh.bulk_read(host, token, args["module"])
+            return zh.bulk_read(host, token, _validate_module(args["module"]))
         if tool == "zoho_bulk_write":
-            return zh.bulk_write(host, token, args["module"], args["operation"], args["records"])
+            return zh.bulk_write(host, token, _validate_module(args["module"]), args["operation"], args["records"])
 
         for obj, module in _MODULES.items():
             if tool == _list_tool_name(obj):

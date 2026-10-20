@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import httpx
 
 import adapters
-from adapters.zoho import ZohoAdapter, UnknownDataCenter
+from adapters.zoho import ZohoAdapter, UnknownDataCenter, InvalidZohoPathSegment
+from coql_guard import CoqlRejected
 
 adapter = ZohoAdapter()
 
@@ -67,6 +68,90 @@ def test_query_coql():
     assert result == {"records": [{"id": "1"}]}
 
 
+def test_query_coql_rejects_multi_statement_before_any_http_call():
+    called = {"n": 0}
+    orig = httpx.request
+    def fake_request(*a, **k):
+        called["n"] += 1
+        return httpx.Response(200, json={})
+    httpx.request = fake_request
+    try:
+        try:
+            adapter.call("zoho_query_coql", {"select_query": "select id from Leads; select id from Contacts"}, _conn())
+            assert False, "should have raised CoqlRejected"
+        except CoqlRejected:
+            pass
+    finally:
+        httpx.request = orig
+    assert called["n"] == 0
+
+
+def test_query_coql_caps_an_excessive_limit():
+    orig = _patch_httpx_request({"data": []})
+    try:
+        adapter.call("zoho_query_coql", {"select_query": "select id from Leads LIMIT 99999"}, _conn())
+    finally:
+        httpx.request = orig
+
+
+def test_get_related_records_rejects_unknown_module_before_any_http_call():
+    called = {"n": 0}
+    orig = httpx.request
+    def fake_request(*a, **k):
+        called["n"] += 1
+        return httpx.Response(200, json={})
+    httpx.request = fake_request
+    try:
+        try:
+            adapter.call("zoho_get_related_records", {"module": "Leads/123/actions/convert", "id": "1", "related_list": "x"}, _conn())
+            assert False, "should have raised InvalidZohoPathSegment"
+        except InvalidZohoPathSegment:
+            pass
+    finally:
+        httpx.request = orig
+    assert called["n"] == 0, "no HTTP call should have been made for an out-of-allowlist module"
+
+
+def test_get_related_records_rejects_related_list_with_path_separator():
+    orig = httpx.request
+    httpx.request = lambda *a, **k: httpx.Response(200, json={})
+    try:
+        try:
+            adapter.call("zoho_get_related_records", {"module": "Leads", "id": "1", "related_list": "Notes/../Contacts"}, _conn())
+            assert False, "should have raised InvalidZohoPathSegment"
+        except InvalidZohoPathSegment:
+            pass
+    finally:
+        httpx.request = orig
+
+
+def test_get_related_records_accepts_known_module_and_related_list():
+    orig = _patch_httpx_request({"data": [{"id": "1"}]})
+    try:
+        result = adapter.call("zoho_get_related_records", {"module": "Leads", "id": "1", "related_list": "Notes"}, _conn())
+    finally:
+        httpx.request = orig
+    assert result == {"records": [{"id": "1"}]}
+
+
+def test_bulk_read_rejects_unknown_module_before_any_http_call():
+    called = {"n": 0}
+    orig = httpx.request
+    def fake_request(*a, **k):
+        called["n"] += 1
+        return httpx.Response(200, json={})
+    httpx.request = fake_request
+    try:
+        try:
+            adapter.call("zoho_bulk_read", {"module": "not_a_real_module"}, _conn())
+            assert False, "should have raised InvalidZohoPathSegment"
+        except InvalidZohoPathSegment:
+            pass
+    finally:
+        httpx.request = orig
+    assert called["n"] == 0
+
+
 def test_mass_convert_leads_requires_confirm():
     spec = next(t for t in adapter.tools() if t.name == "zoho_mass_convert_leads")
     assert spec.requires_confirm is True
@@ -89,6 +174,12 @@ if __name__ == "__main__":
     test_list_leads()
     test_unknown_dc_rejected_before_any_http_call()
     test_query_coql()
+    test_query_coql_rejects_multi_statement_before_any_http_call()
+    test_query_coql_caps_an_excessive_limit()
+    test_get_related_records_rejects_unknown_module_before_any_http_call()
+    test_get_related_records_rejects_related_list_with_path_separator()
+    test_get_related_records_accepts_known_module_and_related_list()
+    test_bulk_read_rejects_unknown_module_before_any_http_call()
     test_mass_convert_leads_requires_confirm()
     test_bulk_read_write_require_confirm()
     test_create_lead_not_confirm_gated()
