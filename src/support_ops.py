@@ -637,14 +637,19 @@ def customer_followup_gap_detector(user_id: str, days: int = 7) -> dict:
         return ctx
     now = ctx["now"]
 
+    def idle_days(ts: str | None) -> float | None:
+        t = _parse(ts)
+        if t and t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return round(_hours(now, t) / 24, 1) if t else None
+
+    sort_key = lambda r: -(r["idle_days"] if r["idle_days"] is not None else 1e9)  # noqa: E731
+
     stale_tickets = []
     for t in ctx["tickets"]:
         if not _open(t):
             continue
-        updated = _parse(t.get("updated_at"))
-        if updated and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        idle = round(_hours(now, updated) / 24, 1) if updated else None
+        idle = idle_days(t.get("updated_at"))
         if idle is None or idle >= days:
             stale_tickets.append({**_brief(t, now), "idle_days": idle})
 
@@ -652,15 +657,12 @@ def customer_followup_gap_detector(user_id: str, days: int = 7) -> dict:
     for d in ctx["deals"]:
         if d["is_closed"]:
             continue
-        last = _parse(d["last_activity"]) if d["last_activity"] else None
-        if last and last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        idle = round(_hours(now, last) / 24, 1) if last else None
+        idle = idle_days(d["last_activity"])
         if idle is None or idle >= days:
             stale_deals.append({**_deal_brief(d), "idle_days": idle})
 
-    stale_tickets.sort(key=lambda t: -(t["idle_days"] if t["idle_days"] is not None else 1e9))
-    stale_deals.sort(key=lambda d: -(d["idle_days"] if d["idle_days"] is not None else 1e9))
+    stale_tickets.sort(key=sort_key)
+    stale_deals.sort(key=sort_key)
     return {
         "days": days,
         "stale_tickets": stale_tickets,
